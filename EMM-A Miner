@@ -238,6 +238,24 @@ IndicatorTransitionState indicatorTransition = IndicatorTransitionState.None;
 readonly Color indicatorAutopilotColor = new Color(0, 200, 255);
 readonly Color indicatorFlashColor = new Color(0, 255, 0);
 readonly Color indicatorNeutralColor = Color.White;
+Color? _lastIndicatorColor = null;
+bool? _lastIndicatorEnabled = null;
+
+void SetIndicatorColor(Color c)
+{
+    if (_lastIndicatorColor.HasValue && _lastIndicatorColor.Value == c)
+        return;
+    indicatorLight.Color = c;
+    _lastIndicatorColor = c;
+}
+
+void SetIndicatorEnabled(bool e)
+{
+    if (_lastIndicatorEnabled.HasValue && _lastIndicatorEnabled.Value == e)
+        return;
+    indicatorLight.Enabled = e;
+    _lastIndicatorEnabled = e;
+}
 
 public Program ()
 {
@@ -1002,24 +1020,24 @@ void UpdateIndicatorLight()
         {
             if (indicatorTransition != IndicatorTransitionState.WaitEnableAfterColor)
             {
-                indicatorLight.Color = desiredOnColor; // set color first
+                SetIndicatorColor(desiredOnColor); // set color first
                 indicatorDelayTicksRemaining = GetIndicatorDelayTicks();
                 indicatorTransition = IndicatorTransitionState.WaitEnableAfterColor;
             }
             else
             {
-                indicatorLight.Color = desiredOnColor;
+                SetIndicatorColor(desiredOnColor);
                 indicatorDelayTicksRemaining--;
                 if (indicatorDelayTicksRemaining <= 0)
                 {
-                    indicatorLight.Enabled = true; // enable after delay
+                    SetIndicatorEnabled(true); // enable after delay
                     indicatorTransition = IndicatorTransitionState.None;
                 }
             }
         }
         else
         {
-            indicatorLight.Color = desiredOnColor;
+            SetIndicatorColor(desiredOnColor);
             indicatorTransition = IndicatorTransitionState.None;
             indicatorDelayTicksRemaining = 0;
         }
@@ -1034,7 +1052,7 @@ void UpdateIndicatorLight()
 
     if (indicatorLight.Enabled)
     {
-        indicatorLight.Enabled = false; // off first
+        SetIndicatorEnabled(false); // off first
         indicatorDelayTicksRemaining = GetIndicatorDelayTicks();
         indicatorTransition = IndicatorTransitionState.WaitNeutralAfterDisable;
         return;
@@ -1045,13 +1063,13 @@ void UpdateIndicatorLight()
         indicatorDelayTicksRemaining--;
         if (indicatorDelayTicksRemaining <= 0)
         {
-            indicatorLight.Color = indicatorNeutralColor; // neutral after delay while off
+            SetIndicatorColor(indicatorNeutralColor); // neutral after delay while off
             indicatorTransition = IndicatorTransitionState.None;
         }
         return;
     }
 
-    indicatorLight.Color = indicatorNeutralColor;
+    SetIndicatorColor(indicatorNeutralColor);
 }
 
 // Returns the anchor for the path timer. If the timer is empty, seeds a header using the

@@ -90,6 +90,24 @@ enum IndicatorTransitionState { None, WaitEnableAfterColor, WaitNeutralAfterDisa
 IndicatorTransitionState indicatorTransition = IndicatorTransitionState.None;
 readonly Color indicatorAutopilotColor = new Color(0, 200, 255);
 readonly Color indicatorNeutralColor = Color.White;
+Color? _lastIndicatorColor = null;
+bool? _lastIndicatorEnabled = null;
+
+void SetIndicatorColor(Color c)
+{
+    if (_lastIndicatorColor.HasValue && _lastIndicatorColor.Value == c)
+        return;
+    indicatorLight.Color = c;
+    _lastIndicatorColor = c;
+}
+
+void SetIndicatorEnabled(bool e)
+{
+    if (_lastIndicatorEnabled.HasValue && _lastIndicatorEnabled.Value == e)
+        return;
+    indicatorLight.Enabled = e;
+    _lastIndicatorEnabled = e;
+}
 
 Vector3D targetPosition  = Vector3D.Zero;
 bool hasTarget           = false;
@@ -257,24 +275,24 @@ void UpdateIndicatorLight()
         {
             if (indicatorTransition != IndicatorTransitionState.WaitEnableAfterColor)
             {
-                indicatorLight.Color = desiredOnColor; // set color first
+                SetIndicatorColor(desiredOnColor); // set color first
                 indicatorDelayTicksRemaining = GetIndicatorDelayTicks();
                 indicatorTransition = IndicatorTransitionState.WaitEnableAfterColor;
             }
             else
             {
-                indicatorLight.Color = desiredOnColor;
+                SetIndicatorColor(desiredOnColor);
                 indicatorDelayTicksRemaining--;
                 if (indicatorDelayTicksRemaining <= 0)
                 {
-                    indicatorLight.Enabled = true; // turn on after delay
+                    SetIndicatorEnabled(true); // turn on after delay
                     indicatorTransition = IndicatorTransitionState.None;
                 }
             }
         }
         else
         {
-            indicatorLight.Color = desiredOnColor;
+            SetIndicatorColor(desiredOnColor);
             indicatorTransition = IndicatorTransitionState.None;
             indicatorDelayTicksRemaining = 0;
         }
@@ -289,7 +307,7 @@ void UpdateIndicatorLight()
 
     if (indicatorLight.Enabled)
     {
-        indicatorLight.Enabled = false; // turn off first
+        SetIndicatorEnabled(false); // turn off first
         indicatorDelayTicksRemaining = GetIndicatorDelayTicks();
         indicatorTransition = IndicatorTransitionState.WaitNeutralAfterDisable;
         return;
@@ -300,13 +318,13 @@ void UpdateIndicatorLight()
         indicatorDelayTicksRemaining--;
         if (indicatorDelayTicksRemaining <= 0)
         {
-            indicatorLight.Color = indicatorNeutralColor; // set neutral after off delay
+            SetIndicatorColor(indicatorNeutralColor); // set neutral after off delay
             indicatorTransition = IndicatorTransitionState.None;
         }
         return;
     }
 
-    indicatorLight.Color = indicatorNeutralColor;
+    SetIndicatorColor(indicatorNeutralColor);
 }
 
 void BroadcastDockPose()
