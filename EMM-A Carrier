@@ -134,6 +134,9 @@ double runtimePeakWindowElapsedSeconds = 0;
 IMyTimerBlock _cachedPathTimer;
 IMyTimerBlock _cachedZoneDbTimer;
 IMyTimerBlock _cachedStateIniTimer;
+string _zoneDbCacheText = null;
+List<ZoneAsteroidRecord> _zoneDbCacheRecords = new List<ZoneAsteroidRecord>();
+Dictionary<int, ZoneAsteroidRecord> _zoneDbCacheByNumber = new Dictionary<int, ZoneAsteroidRecord>();
 const string StateIniSection = "state";
 MyIni _stateIni = new MyIni();
 // Counts SaveStateProgressOnly calls since the last full SaveState. When this
@@ -843,7 +846,7 @@ bool TrySelectFullAutoAsteroid(out ZoneAsteroidRecord selected, out string reaso
         return false;
     }
 
-    List<ZoneAsteroidRecord> records = ParseZoneDbRecords(zoneDb.CustomData ?? "");
+    List<ZoneAsteroidRecord> records = GetZoneDbRecordsCached();
     if (records.Count == 0)
     {
         reason = "Zone DB has no asteroid records.";
@@ -966,6 +969,44 @@ List<ZoneAsteroidRecord> ParseZoneDbRecords(string customData)
     }
 
     return records;
+}
+
+List<ZoneAsteroidRecord> GetZoneDbRecordsCached()
+{
+    IMyTimerBlock zoneDb = FindZoneDbTimer();
+    if (zoneDb == null)
+    {
+        InvalidateZoneDbCache();
+        return _zoneDbCacheRecords;
+    }
+
+    string text = zoneDb.CustomData ?? "";
+    if (_zoneDbCacheText != null && string.Equals(_zoneDbCacheText, text, StringComparison.Ordinal))
+        return _zoneDbCacheRecords;
+
+    _zoneDbCacheRecords = ParseZoneDbRecords(text);
+    _zoneDbCacheByNumber.Clear();
+    for (int i = 0; i < _zoneDbCacheRecords.Count; i++)
+    {
+        ZoneAsteroidRecord rec = _zoneDbCacheRecords[i];
+        if (!_zoneDbCacheByNumber.ContainsKey(rec.Number))
+            _zoneDbCacheByNumber.Add(rec.Number, rec);
+    }
+    _zoneDbCacheText = text;
+    return _zoneDbCacheRecords;
+}
+
+bool TryGetZoneAsteroidRecord(int asteroidNum, out ZoneAsteroidRecord rec)
+{
+    GetZoneDbRecordsCached();
+    return _zoneDbCacheByNumber.TryGetValue(asteroidNum, out rec);
+}
+
+void InvalidateZoneDbCache()
+{
+    _zoneDbCacheText = null;
+    _zoneDbCacheRecords.Clear();
+    _zoneDbCacheByNumber.Clear();
 }
 
 List<string> ParseOresLine(string oresText)
@@ -1403,6 +1444,7 @@ void SimulateRecompile()
 
     _cachedPathTimer   = null;
     _cachedZoneDbTimer = null;
+    InvalidateZoneDbCache();
     Echo("SaveAsteroid: recompile done.");
 }
 
@@ -1429,10 +1471,8 @@ HashSet<int> CollectAsteroidDbNumbers()
 // Returns all asteroid numbers stored in the Zone DB.
 HashSet<int> CollectZoneDbNumbers()
 {
-    IMyTimerBlock zoneDb = FindZoneDbTimer();
-    if (zoneDb == null) return new HashSet<int>();
     var nums = new HashSet<int>();
-    foreach (var rec in ParseZoneDbRecords(zoneDb.CustomData ?? ""))
+    foreach (var rec in GetZoneDbRecordsCached())
         nums.Add(rec.Number);
     return nums;
 }
@@ -1476,7 +1516,7 @@ void RunDbCheck(bool fix)
     if (zoneDb == null) { Echo("dbcheck;fix: Zone DB timer not found."); return; }
     var orphanSet = new HashSet<int>(orphanedZone);
     var kept = new List<ZoneAsteroidRecord>();
-    foreach (var rec in ParseZoneDbRecords(zoneDb.CustomData ?? ""))
+    foreach (var rec in GetZoneDbRecordsCached())
         if (!orphanSet.Contains(rec.Number)) kept.Add(rec);
 
     var sb = new StringBuilder();
@@ -1497,6 +1537,7 @@ void RunDbCheck(bool fix)
         sb.AppendLine("Status: " + (string.IsNullOrWhiteSpace(rec.Status) ? "Open" : rec.Status));
     }
     zoneDb.CustomData = sb.ToString();
+    InvalidateZoneDbCache();
     Echo($"dbcheck;fix: removed {orphanedZone.Count} orphaned Zone entr{(orphanedZone.Count == 1 ? "y" : "ies")}.");
 }
 
@@ -1780,21 +1821,12 @@ bool TryGetCarrierPoseFromZoneDb(int asteroidNum, out Vector3D pos, out Vector3D
     forward = Vector3D.Zero;
     up = Vector3D.Zero;
 
-    IMyTimerBlock zoneDb = FindZoneDbTimer();
-    if (zoneDb == null)
+    ZoneAsteroidRecord rec;
+    if (!TryGetZoneAsteroidRecord(asteroidNum, out rec))
         return false;
 
-    string[] lines = (zoneDb.CustomData ?? "").Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
-    string label = asteroidNum.ToString("D3");
-    for (int i = 0; i < lines.Length - 1; i++)
-    {
-        if (!string.Equals(lines[i].Trim(), label, StringComparison.OrdinalIgnoreCase))
-            continue;
-
-        if (TryParseCarrierAnchorLine(lines[i + 1].Trim(), out pos, out forward, out up))
-            return true;
-    }
-    return false;
+    pos = rec.Position;
+    return TryParseCarrierAnchorLine(rec.GpsLine, out pos, out forward, out up);
 }
 
 bool SegmentIntersectsSphere(Vector3D a, Vector3D b, Vector3D center, double radius)
@@ -1886,6 +1918,7 @@ void UpdateZoneDb(int asteroidNum, string dbTimerName, string carrierGps, Dictio
     sb.AppendLine("Status: " + BuildAsteroidStatus(oreMap));
 
     zoneDb.CustomData = sb.ToString();
+    InvalidateZoneDbCache();
 }
 
 
@@ -1974,6 +2007,7 @@ void SetAllAsteroidsOpen()
     }
 
     zoneDb.CustomData = string.Join("\n", lines).TrimEnd();
+    InvalidateZoneDbCache();
     Echo($"SetAllOpen: status set to Open (updated {updated}, added {added}).");
 }
 
@@ -1990,38 +2024,12 @@ bool IsAsteroidLabelLine(string line, out int asteroidNum)
 bool TryGetAsteroidStatus(int asteroidNum, out string status)
 {
     status = "";
-    IMyTimerBlock zoneDb = FindZoneDbTimer();
-    if (zoneDb == null)
+    ZoneAsteroidRecord rec;
+    if (!TryGetZoneAsteroidRecord(asteroidNum, out rec))
         return false;
 
-    string label = asteroidNum.ToString("D3");
-    string[] lines = (zoneDb.CustomData ?? "").Split(new[] { '\n', '\r' }, StringSplitOptions.None);
-    for (int i = 0; i < lines.Length; i++)
-    {
-        if (!string.Equals(lines[i].Trim(), label, StringComparison.OrdinalIgnoreCase))
-            continue;
-
-        for (int j = i + 1; j < lines.Length; j++)
-        {
-            string t = lines[j].Trim();
-            if (string.IsNullOrWhiteSpace(t))
-                continue;
-
-            int nextNum;
-            if (IsAsteroidLabelLine(t, out nextNum) ||
-                t.IndexOf(asteroidDbTagPfx, StringComparison.OrdinalIgnoreCase) >= 0)
-                break;
-
-            if (t.StartsWith("Status:", StringComparison.OrdinalIgnoreCase))
-            {
-                status = t.Substring("Status:".Length).Trim();
-                return true;
-            }
-        }
-        break;
-    }
-
-    return false;
+    status = rec.Status;
+    return !string.IsNullOrWhiteSpace(status);
 }
 
 bool TrySetAsteroidStatus(int asteroidNum, string newStatus)
@@ -2076,6 +2084,7 @@ bool TrySetAsteroidStatus(int asteroidNum, string newStatus)
         }
 
         zoneDb.CustomData = string.Join("\n", lines).TrimEnd();
+        InvalidateZoneDbCache();
         return true;
     }
 
