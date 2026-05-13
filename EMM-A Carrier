@@ -52,8 +52,8 @@ double maxSpeed               = 25;
 double arrivalTolerance       = 2.5;
 double orientationToleranceDeg = 1.0;
 string pathTimerTag           = "Carrier Path";
-// Persistent runtime state is stored in the CustomData of this timer as MyIni.
-// Treat this INI as the carrier save-state location from now on; programmable block Storage is intentionally unused.
+// Full runtime snapshots are stored in this timer's CustomData as MyIni.
+// Periodic volatile progress is stored as a small PB Storage overlay to avoid CustomData write spikes.
 string stateIniTimerTag       = "EMM-A Ca INI";
 double TOFFR = 0;
 double TOFFU = 0;
@@ -149,13 +149,10 @@ string _zoneDbCacheText = null;
 List<ZoneAsteroidRecord> _zoneDbCacheRecords = new List<ZoneAsteroidRecord>();
 Dictionary<int, ZoneAsteroidRecord> _zoneDbCacheByNumber = new Dictionary<int, ZoneAsteroidRecord>();
 const string StateIniSection = "state";
+const string ProgressIniSection = "progress";
 MyIni _stateIni = new MyIni();
-// Counts SaveStateProgressOnly calls since the last full SaveState. When this
-// hits FullSaveCadence we promote the next progress save to a full save so that
-// fields not covered by the progress-only path (e.g. path anchor pose, mine
-// saved pose, full pathRecords list) get re-snapshotted periodically.
-int _progressSavesSinceFull = 0;
-const int FullSaveCadence = 10;
+MyIni _progressIni = new MyIni();
+bool _hasProgressState = false;
 bool fullStateDirty = false;
 
 bool goToMode = false;
@@ -2287,9 +2284,9 @@ bool TrySetAsteroidStatus(int asteroidNum, string newStatus)
 }
 
 // ---- State persistence (MyIni timer CustomData) ----
-// This section replaces the old programmable block Storage save-state path.
 // The timer named by stateIniTimerTag owns all runtime persistence for this script.
-// If you need to inspect, backup, reset, or hand-edit saved state, use that timer's CustomData INI.
+// PB Storage contains only the small volatile progress overlay used to avoid periodic CustomData write spikes.
+// If you need to inspect, backup, reset, or hand-edit full saved state, use that timer's CustomData INI.
 
 string V3ToString(Vector3D v)
 {
@@ -2312,7 +2309,7 @@ bool ReadStateIni(out MyIni ini)
 {
     ini = new MyIni();
 
-    // Load only from the dedicated state INI timer. No Storage fallback is used.
+    // Load the full snapshot from the dedicated state INI timer.
     IMyTimerBlock timer = FindStateIniTimer();
     if (timer == null)
         return false;
@@ -2344,8 +2341,34 @@ void WriteStateIni(MyIni ini)
     timer.CustomData = ini.ToString();
 }
 
+bool ReadProgressState()
+{
+    _progressIni.Clear();
+    string data = Storage ?? "";
+    if (string.IsNullOrWhiteSpace(data))
+        return false;
+
+    MyIniParseResult result;
+    if (!_progressIni.TryParse(data, out result))
+        return false;
+
+    return true;
+}
+
+void WriteProgressState(MyIni ini)
+{
+    Storage = ini.ToString();
+    _hasProgressState = true;
+}
+
 string StateString(MyIni ini, string key, string fallback)
 {
+    if (_hasProgressState)
+    {
+        string progress = _progressIni.Get(ProgressIniSection, key).ToString(null);
+        if (progress != null)
+            return progress;
+    }
     return ini.Get(StateIniSection, key).ToString(fallback);
 }
 
@@ -2390,8 +2413,10 @@ List<IMyTimerBlock> GetTimerBlocksCached()
 
 void SaveState()
 {
-    _progressSavesSinceFull = 0;
     fullStateDirty = false;
+    Storage = "";
+    _hasProgressState = false;
+    _progressIni.Clear();
     MyIni ini = _stateIni;
     ini.Clear();
     ini.Set(StateIniSection, "autopilotEnabled", autopilotEnabled ? "1" : "0");
@@ -2423,49 +2448,40 @@ void SaveState()
     WriteStateIni(ini);
 }
 
-// Cheap save: updates only the volatile bool/int/enum fields onto the cached
-// _stateIni and rewrites the INI string. Skips V3ToString calls and the
-// pathRecords loop. Stable fields (path anchor, mine saved pose, area lanes,
-// pathRecord{i}) are preserved from whatever the last full SaveState wrote
-// into _stateIni. Full saves are promoted only when stable/collection state is
-// dirty, avoiding periodic pathRecord{i} rewrites when nothing changed.
+// Cheap save: writes only volatile progress into PB Storage. This avoids
+// serializing the full timer CustomData INI during regular Update ticks.
 void SaveStateProgressOnly()
 {
-    if (fullStateDirty && _progressSavesSinceFull >= FullSaveCadence)
-    {
-        SaveState();
-        return;
-    }
-    _progressSavesSinceFull++;
-
-    MyIni ini = _stateIni;
-    ini.Set(StateIniSection, "autopilotEnabled", autopilotEnabled ? "1" : "0");
-    ini.Set(StateIniSection, "hasTarget", hasTarget ? "1" : "0");
-    ini.Set(StateIniSection, "targetPosition", V3ToString(targetPosition));
-    ini.Set(StateIniSection, "desiredForward", V3ToString(desiredForward));
-    ini.Set(StateIniSection, "desiredUp", V3ToString(desiredUp));
-    ini.Set(StateIniSection, "activeMaxSpeed", activeMaxSpeed.ToString("R"));
-    ini.Set(StateIniSection, "pathMode", pathMode ? "1" : "0");
-    ini.Set(StateIniSection, "pathPaused", pathPaused ? "1" : "0");
-    ini.Set(StateIniSection, "pathPausedNavResume", pathPausedNavResume ? "1" : "0");
-    ini.Set(StateIniSection, "pathIndex", pathIndex);
-    ini.Set(StateIniSection, "pathAnchorValid", pathAnchorValid ? "1" : "0");
-    ini.Set(StateIniSection, "mineSequenceState", (int)mineSequenceState);
-    ini.Set(StateIniSection, "mineAsteroidNum", mineAsteroidNum);
-    ini.Set(StateIniSection, "mineSavedPos", V3ToString(mineSavedPos));
-    ini.Set(StateIniSection, "mineSavedForward", V3ToString(mineSavedForward));
-    ini.Set(StateIniSection, "mineSavedUp", V3ToString(mineSavedUp));
-    ini.Set(StateIniSection, "mineFrontApproachPoint", V3ToString(mineFrontApproachPoint));
-    ini.Set(StateIniSection, "minerPathCompleteReceived", minerPathCompleteReceived ? "1" : "0");
-    ini.Set(StateIniSection, "mineStationaryTicks", mineStationaryTicks);
-    ini.Set(StateIniSection, "fullAutoEnabled", fullAutoEnabled ? "1" : "0");
-    WriteStateIni(ini);
+    MyIni ini = _progressIni;
+    ini.Clear();
+    ini.Set(ProgressIniSection, "autopilotEnabled", autopilotEnabled ? "1" : "0");
+    ini.Set(ProgressIniSection, "hasTarget", hasTarget ? "1" : "0");
+    ini.Set(ProgressIniSection, "targetPosition", V3ToString(targetPosition));
+    ini.Set(ProgressIniSection, "desiredForward", V3ToString(desiredForward));
+    ini.Set(ProgressIniSection, "desiredUp", V3ToString(desiredUp));
+    ini.Set(ProgressIniSection, "activeMaxSpeed", activeMaxSpeed.ToString("R"));
+    ini.Set(ProgressIniSection, "pathMode", pathMode ? "1" : "0");
+    ini.Set(ProgressIniSection, "pathPaused", pathPaused ? "1" : "0");
+    ini.Set(ProgressIniSection, "pathPausedNavResume", pathPausedNavResume ? "1" : "0");
+    ini.Set(ProgressIniSection, "pathIndex", pathIndex);
+    ini.Set(ProgressIniSection, "pathAnchorValid", pathAnchorValid ? "1" : "0");
+    ini.Set(ProgressIniSection, "mineSequenceState", (int)mineSequenceState);
+    ini.Set(ProgressIniSection, "mineAsteroidNum", mineAsteroidNum);
+    ini.Set(ProgressIniSection, "mineSavedPos", V3ToString(mineSavedPos));
+    ini.Set(ProgressIniSection, "mineSavedForward", V3ToString(mineSavedForward));
+    ini.Set(ProgressIniSection, "mineSavedUp", V3ToString(mineSavedUp));
+    ini.Set(ProgressIniSection, "mineFrontApproachPoint", V3ToString(mineFrontApproachPoint));
+    ini.Set(ProgressIniSection, "minerPathCompleteReceived", minerPathCompleteReceived ? "1" : "0");
+    ini.Set(ProgressIniSection, "mineStationaryTicks", mineStationaryTicks);
+    ini.Set(ProgressIniSection, "fullAutoEnabled", fullAutoEnabled ? "1" : "0");
+    WriteProgressState(ini);
 }
 
 void LoadState()
 {
     MyIni ini;
     if (!ReadStateIni(out ini)) return;
+    _hasProgressState = ReadProgressState();
 
     string s;
     int n;
