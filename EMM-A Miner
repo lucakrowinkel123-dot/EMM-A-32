@@ -177,6 +177,9 @@ IMyShipMergeBlock minerMerger;
 IMyShipMergeBlock carrierMerger;
 IMyLightingBlock indicatorLight;
 IMyBroadcastListener dockListener;
+MatrixD _tickRcMatrix = MatrixD.Identity;
+Vector3D _tickRcPosition = Vector3D.Zero;
+bool rcCanControlGyros = false;
 List<IMyGyro> allGyros = new List<IMyGyro>();
 List<IMyThrust> allThrusters = new List<IMyThrust>();
 List<IMyRadioAntenna> antennas = new List<IMyRadioAntenna>();
@@ -281,6 +284,8 @@ public Program ()
         rc = GetBlock<IMyRemoteControl>();
     if (rc == null) // No cockpits found.
         throw new Exception("No cockpit/remote control found. Set the cockpitName field at the top of the script.");
+    rcCanControlGyros = rc.GetProperty("ControlGyros") != null;
+    RefreshTickPose();
 
     allGyros = GetBlocks<IMyGyro>().FindAll(b => HasMinerTag(b));
     allThrusters = GetBlocks<IMyThrust>().FindAll(b => HasMinerTag(b));
@@ -325,6 +330,7 @@ public void Main (string argument, UpdateType updateSource)
     if (updateSource == UpdateType.Update100 || updateSource == UpdateType.Update10 || updateSource == UpdateType.Update1)
     {
         UpdateRuntimeMetrics();
+        RefreshTickPose();
         UpdateDockPoseAge();
         if (dockPosePollTicks > 0)
             dockPosePollTicks--;
@@ -394,12 +400,18 @@ void UpdateRuntimeMetrics()
     }
 }
 
+void RefreshTickPose()
+{
+    _tickRcMatrix = rc.WorldMatrix;
+    _tickRcPosition = rc.GetPosition();
+}
+
 void Move ()
 {
     movementResetApplied = false;
-    MatrixD rcMatrix = rc.WorldMatrix;
+    MatrixD rcMatrix = _tickRcMatrix;
     Vector3D worldOffset = GetActiveTargetOffsetWorld(rcMatrix);
-    Vector3D rcPosition = rc.GetPosition();
+    Vector3D rcPosition = _tickRcPosition;
     Vector3D position = rcPosition + worldOffset;
     Vector3D toTarget = targetPosition - position;
     double tolerance = GetActiveArrivalTolerance();
@@ -447,7 +459,7 @@ void Move ()
 
 Vector3D GetTargetOffsetWorld()
 {
-    return GetTargetOffsetWorld(rc.WorldMatrix);
+    return GetTargetOffsetWorld(_tickRcMatrix);
 }
 
 Vector3D GetTargetOffsetWorld(MatrixD wm)
@@ -457,7 +469,7 @@ Vector3D GetTargetOffsetWorld(MatrixD wm)
 
 Vector3D GetDockConnectorOffsetWorld()
 {
-    return GetDockConnectorOffsetWorld(rc.WorldMatrix);
+    return GetDockConnectorOffsetWorld(_tickRcMatrix);
 }
 
 Vector3D GetDockConnectorOffsetWorld(MatrixD wm)
@@ -467,7 +479,7 @@ Vector3D GetDockConnectorOffsetWorld(MatrixD wm)
 
 Vector3D GetActiveTargetOffsetWorld()
 {
-    return GetActiveTargetOffsetWorld(rc.WorldMatrix);
+    return GetActiveTargetOffsetWorld(_tickRcMatrix);
 }
 
 Vector3D GetActiveTargetOffsetWorld(MatrixD wm)
@@ -479,7 +491,7 @@ Vector3D GetActiveTargetOffsetWorld(MatrixD wm)
 
 bool IsOrientationAligned(Vector3D forward, Vector3D up, double toleranceDeg)
 {
-    return IsOrientationAligned(rc.WorldMatrix, forward, up, toleranceDeg);
+    return IsOrientationAligned(_tickRcMatrix, forward, up, toleranceDeg);
 }
 
 bool IsOrientationAligned(MatrixD wm, Vector3D forward, Vector3D up, double toleranceDeg)
@@ -848,7 +860,7 @@ bool UpdatePathRecordState()
 {
     if (pathRecordingEnabled && !pathRecordingPaused && !pathRecordingWaitReturn)
     {
-        Vector3D now = rc.GetPosition();
+        Vector3D now = _tickRcPosition;
         if (Vector3D.DistanceSquared(now, pathRecordLastPos) >= pathRecordMeters * pathRecordMeters)
         {
             SavePathGpsRecord();
@@ -865,7 +877,7 @@ bool UpdatePathRecordState()
             hasTarget = false;
             pathRecordingWaitReturn = false;
             pathRecordMineStage = PathRecordMineStage.Idle;
-            pathRecordLastPos = rc.GetPosition();
+            pathRecordLastPos = _tickRcPosition;
             SetCockpitGyroControl(true);
             SetMineIndicatorSensor(false);
             // Auto-start area mining for the area just recorded (corners cleared after to prevent re-trigger)
@@ -901,7 +913,8 @@ bool UpdatePathRecordState()
 
     if (pathRecordMineStage != PathRecordMineStage.CornerCaptured)
     {
-        SetCockpitGyroControl(true);
+        if (cockpitGyroControlForcedOff)
+            SetCockpitGyroControl(true);
         return false;
     }
 
@@ -912,21 +925,22 @@ bool UpdatePathRecordState()
         return false;
     Vector3D right = Vector3D.Normalize(Vector3D.Cross(forward, up));
     Vector3D down = -up;
-    Vector3D delta = rc.GetPosition() - pathRecordMineCornerA;
+    Vector3D currentPosition = _tickRcPosition;
+    Vector3D delta = currentPosition - pathRecordMineCornerA;
     double r = Vector3D.Dot(delta, right);
     double d = Vector3D.Dot(delta, down);
     double f = Vector3D.Dot(delta, forward);
     double clampedR = Math.Max(0, r);
     double clampedD = Math.Max(0, d);
     Vector3D allowed = pathRecordMineCornerA + right * clampedR + down * clampedD;
-    if (Math.Abs(f) < 0.05 && Vector3D.DistanceSquared(rc.GetPosition(), allowed) < 0.05 * 0.05)
+    if (Math.Abs(f) < 0.05 && Vector3D.DistanceSquared(currentPosition, allowed) < 0.05 * 0.05)
     {
-        gyros.FaceVectors(forward, up);
+        gyros.FaceVectors(_tickRcMatrix, forward, up);
         return false;
     }
 
-    gyros.FaceVectors(forward, up);
-    thrust.ApplyAccel(thrust.ControlPosition(allowed, Vector3D.Zero, SPEEDB));
+    gyros.FaceVectors(_tickRcMatrix, forward, up);
+    thrust.ApplyAccel(thrust.ControlPositionFrom(currentPosition, allowed, Vector3D.Zero, SPEEDB));
     return true;
 }
 
@@ -1216,9 +1230,7 @@ void InitializeMineIndicatorSensors()
 
 void SetCockpitGyroControl(bool enabled)
 {
-    if (rc == null)
-        return;
-    if (rc.GetProperty("ControlGyros") == null)
+    if (rc == null || !rcCanControlGyros)
         return;
     if (enabled)
     {
@@ -1428,6 +1440,7 @@ bool RefreshDockHardware()
 
 void RecompileFlightSystems()
 {
+    rcCanControlGyros = rc != null && rc.GetProperty("ControlGyros") != null;
     allGyros = GetBlocks<IMyGyro>().FindAll(b => HasMinerTag(b));
     allThrusters = GetBlocks<IMyThrust>().FindAll(b => HasMinerTag(b));
     thrust = new ThrusterControl(rc, tickSpeed, allThrusters);
@@ -2455,7 +2468,7 @@ void ResetDepthAutoTracker()
 
 double GetLaneProgressDepth()
 {
-    return Math.Max(0, Vector3D.Dot(rc.GetPosition() - laneAnchor, drillAxis));
+    return Math.Max(0, Vector3D.Dot(_tickRcPosition - laneAnchor, drillAxis));
 }
 
 double GetLaneTargetDepth()
@@ -2598,7 +2611,8 @@ double GetOreAmount(bool includeStone)
 
 bool CheckStuckInLane()
 {
-    double moved = Vector3D.DistanceSquared(rc.GetPosition(), stuckSamplePos);
+    Vector3D currentPosition = _tickRcPosition;
+    double moved = Vector3D.DistanceSquared(currentPosition, stuckSamplePos);
     if (moved < stuckMoveThreshold * stuckMoveThreshold)
     {
         stuckNoMoveSeconds += secondsPerTick;
@@ -2610,7 +2624,7 @@ bool CheckStuckInLane()
     }
     else
     {
-        stuckSamplePos = rc.GetPosition();
+        stuckSamplePos = currentPosition;
         stuckNoMoveSeconds = 0;
     }
     return false;
@@ -2712,7 +2726,7 @@ bool IsAtTargetPosition(Vector3D target, double toleranceMeters = -1)
 {
     double baseTolerance = toleranceMeters > 0 ? toleranceMeters : arrivalTolerance;
     double tolerance = Math.Max(0.05, baseTolerance);
-    return Vector3D.DistanceSquared(rc.GetPosition() + GetActiveTargetOffsetWorld(), target) < tolerance * tolerance;
+    return Vector3D.DistanceSquared(_tickRcPosition + GetActiveTargetOffsetWorld(_tickRcMatrix), target) < tolerance * tolerance;
 }
 
 bool IsAtTargetPose(Vector3D target, Vector3D forward, Vector3D up, double toleranceMeters = -1)
@@ -3083,7 +3097,7 @@ void LoadState()
     }
 
     // Restore cockpit gyro override if path recording had it locked.
-    if (cockpitGyroControlForcedOff && rc.GetProperty("ControlGyros") != null)
+    if (cockpitGyroControlForcedOff && rcCanControlGyros)
         rc.SetValueBool("ControlGyros", false);
 
     // Restore mine indicator sensor if mid-recording-mine sequence.
@@ -3667,13 +3681,14 @@ class ThrusterControl
             if (!t.IsFunctional)
                 continue;
 
-            float outputThrust = (float)Vector3D.Dot(t.WorldMatrix.Forward, thrust);
+            Vector3D thrustForward = t.WorldMatrix.Forward;
+            float outputThrust = (float)Vector3D.Dot(thrustForward, thrust);
             if (outputThrust > 0)
             {
                 float outputProportion = MathHelper.Clamp(outputThrust / t.MaxEffectiveThrust, minThrust / t.MaxThrust, 1);
                 if (Math.Abs(t.ThrustOverridePercentage - outputProportion) > 0.001f)
                     t.ThrustOverridePercentage = outputProportion;
-                thrust -= t.WorldMatrix.Forward * outputProportion * t.MaxEffectiveThrust;
+                thrust -= thrustForward * outputProportion * t.MaxEffectiveThrust;
             }
             else
             {
