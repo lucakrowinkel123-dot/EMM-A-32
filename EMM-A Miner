@@ -209,6 +209,9 @@ readonly int echoFrequency = 100; // every 100th game tick
 int runtime = 0;
 double runtimePeakLastMinuteMs = 0;
 double runtimePeakWindowElapsedSeconds = 0;
+StringBuilder _echoSb = new StringBuilder(256);
+const int igcPollIntervalTicks = 10;
+int dockPosePollTicks = 0;
 
 bool oreTransferActive = false;
 int oreTransferSourceIdx = 0;
@@ -226,8 +229,12 @@ int _oreScanBlockIndex = 0;
 double _oreScanTotal = 0;
 const int oreScanBlocksPerTick = 3;
 // Cached path timer reference to avoid repeated GTS scans during path recording
+List<IMyTimerBlock> _timerBlocks = new List<IMyTimerBlock>();
+bool _timerBlocksCached = false;
 IMyTimerBlock _cachedPathTimer;
 IMyTimerBlock _cachedStateIniTimer;
+List<IMySensorBlock> _mineSensors = new List<IMySensorBlock>();
+bool _mineSensorsCached = false;
 const string StateIniSection = "state";
 MyIni _stateIni = new MyIni();
 // Counts SaveStateProgressOnly calls since the last full SaveState. When this
@@ -289,8 +296,8 @@ public Program ()
     minerMerger = GetBlock<IMyShipMergeBlock>(minerMergerName, true);
     carrierMerger = GetBlock<IMyShipMergeBlock>(carrierMergerName, true);
     indicatorLight = GetBlock<IMyLightingBlock>(indicatorLightName, true);
+    RefreshTimerCache();
     dockListener = IGC.RegisterBroadcastListener(dockBroadcastTag);
-    dockListener.SetMessageCallback("dockpose");
     UpdateConnectorOffsetLocal();
 
     if (tickSpeed == UpdateFrequency.Update10)
@@ -318,7 +325,14 @@ public void Main (string argument, UpdateType updateSource)
     if (updateSource == UpdateType.Update100 || updateSource == UpdateType.Update10 || updateSource == UpdateType.Update1)
     {
         UpdateRuntimeMetrics();
-        UpdateDockPoseFromBroadcast();
+        UpdateDockPoseAge();
+        if (dockPosePollTicks > 0)
+            dockPosePollTicks--;
+        else
+        {
+            dockPosePollTicks = igcPollIntervalTicks - 1;
+            UpdateDockPoseFromBroadcast();
+        }
         if (runtime % echoFrequency == 0)
         {
             WriteEcho();
@@ -352,7 +366,8 @@ public void Main (string argument, UpdateType updateSource)
 
 void WriteEcho()
 {
-    StringBuilder sb = new StringBuilder();
+    StringBuilder sb = _echoSb;
+    sb.Clear();
     sb.AppendLine("Autopilot Mode");
     sb.AppendLine(autopilotEnabled ? "State: Enabled" : "State: Disabled");
     if (hasTarget)
@@ -1159,7 +1174,7 @@ IMyTimerBlock FindPathTimer()
     if (_cachedPathTimer != null &&
         _cachedPathTimer.CustomName.IndexOf(pathTimerTag, StringComparison.OrdinalIgnoreCase) >= 0)
         return _cachedPathTimer;
-    foreach (var t in GetBlocks<IMyTimerBlock>())
+    foreach (var t in GetTimerBlocksCached())
         if (t != null && !string.IsNullOrWhiteSpace(t.CustomName) &&
             t.CustomName.IndexOf(pathTimerTag, StringComparison.OrdinalIgnoreCase) >= 0)
         {
@@ -1172,12 +1187,16 @@ IMyTimerBlock FindPathTimer()
 
 List<IMySensorBlock> GetMineSensors()
 {
-    var result = new List<IMySensorBlock>();
+    if (_mineSensorsCached)
+        return _mineSensors;
+
+    _mineSensors.Clear();
     foreach (var s in GetBlocks<IMySensorBlock>())
         if (s != null && !string.IsNullOrWhiteSpace(s.CustomName) &&
             s.CustomName.IndexOf(pathRecordMineSensorTag, StringComparison.OrdinalIgnoreCase) >= 0)
-            result.Add(s);
-    return result;
+            _mineSensors.Add(s);
+    _mineSensorsCached = true;
+    return _mineSensors;
 }
 
 void SetMineIndicatorSensor(bool enabled)
@@ -1261,7 +1280,10 @@ void UpdateDockPoseFromBroadcast()
         carrierConnectorUp = Vector3D.Normalize(up);
         carrierPoseAgeSeconds = 0;
     }
+}
 
+void UpdateDockPoseAge()
+{
     carrierPoseAgeSeconds += secondsPerTick;
 }
 
@@ -2799,7 +2821,7 @@ IMyTimerBlock FindStateIniTimer()
         _cachedStateIniTimer.CustomName.IndexOf(stateIniTimerTag, StringComparison.OrdinalIgnoreCase) >= 0)
         return _cachedStateIniTimer;
 
-    foreach (var t in GetBlocks<IMyTimerBlock>())
+    foreach (var t in GetTimerBlocksCached())
     {
         if (t.CustomName.IndexOf(stateIniTimerTag, StringComparison.OrdinalIgnoreCase) >= 0)
         {
@@ -2810,6 +2832,20 @@ IMyTimerBlock FindStateIniTimer()
 
     _cachedStateIniTimer = null;
     return null;
+}
+
+void RefreshTimerCache()
+{
+    _timerBlocks.Clear();
+    GridTerminalSystem.GetBlocksOfType(_timerBlocks, b => b.CubeGrid.EntityId == Me.CubeGrid.EntityId);
+    _timerBlocksCached = true;
+}
+
+List<IMyTimerBlock> GetTimerBlocksCached()
+{
+    if (!_timerBlocksCached)
+        RefreshTimerCache();
+    return _timerBlocks;
 }
 
 void SaveState()

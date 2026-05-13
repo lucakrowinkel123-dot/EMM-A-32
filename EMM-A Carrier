@@ -132,6 +132,14 @@ readonly int echoFrequency = 100;
 int runtime            = 0;
 double runtimePeakLastMinuteMs = 0;
 double runtimePeakWindowElapsedSeconds = 0;
+StringBuilder _echoSb = new StringBuilder(256);
+StringBuilder _dockPoseSb = new StringBuilder(128);
+const int dockBroadcastIntervalTicks = 6;
+int dockBroadcastTicks = 0;
+const int igcPollIntervalTicks = 10;
+int minerPathCompletePollTicks = 0;
+List<IMyTimerBlock> _timerBlocks = new List<IMyTimerBlock>();
+bool _timerBlocksCached = false;
 IMyTimerBlock _cachedPathTimer;
 IMyTimerBlock _cachedZoneDbTimer;
 IMyTimerBlock _cachedStateIniTimer;
@@ -204,6 +212,7 @@ public Program()
     carrierConnector = GridTerminalSystem.GetBlockWithName(carrierConnectorName) as IMyShipConnector;
     indicatorLight = GridTerminalSystem.GetBlockWithName(indicatorLightName) as IMyLightingBlock;
 
+    RefreshTimerCache();
     allGyros     = GetBlocks<IMyGyro>().FindAll(b => HasCarrierTag(b));
     allThrusters = GetBlocks<IMyThrust>().FindAll(b => HasCarrierTag(b));
     thrust = new ThrusterControl(rc, tickSpeed, allThrusters);
@@ -238,7 +247,13 @@ public void Main(string argument, UpdateType updateSource)
             carrierConnector = GridTerminalSystem.GetBlockWithName(carrierConnectorName) as IMyShipConnector;
 
         BroadcastDockPose();
-        PollMinerPathCompletion();
+        if (minerPathCompletePollTicks > 0)
+            minerPathCompletePollTicks--;
+        else
+        {
+            minerPathCompletePollTicks = igcPollIntervalTicks - 1;
+            PollMinerPathCompletion();
+        }
 
         if (runtime % echoFrequency == 0)
         {
@@ -348,23 +363,40 @@ void BroadcastDockPose()
 {
     if (carrierConnector == null)
         return;
+    if (dockBroadcastTicks > 0)
+    {
+        dockBroadcastTicks--;
+        return;
+    }
+    dockBroadcastTicks = dockBroadcastIntervalTicks - 1;
+
     MatrixD m    = carrierConnector.WorldMatrix;
     Vector3D pos = carrierConnector.GetPosition();
-    Vector3D f   = Vector3D.Normalize(m.Forward);
-    Vector3D u   = Vector3D.Normalize(m.Up);
+    Vector3D f   = m.Forward;
+    Vector3D u   = m.Up;
     pos += f * broadcastForwardOffset;
-    string payload = ToCsv(pos) + "|" + ToCsv(f) + "|" + ToCsv(u);
-    IGC.SendBroadcastMessage(dockBroadcastTag, payload);
+    _dockPoseSb.Clear();
+    AppendCsv(_dockPoseSb, pos);
+    _dockPoseSb.Append('|');
+    AppendCsv(_dockPoseSb, f);
+    _dockPoseSb.Append('|');
+    AppendCsv(_dockPoseSb, u);
+    IGC.SendBroadcastMessage(dockBroadcastTag, _dockPoseSb.ToString());
 }
 
-string ToCsv(Vector3D v)
+void AppendCsv(StringBuilder sb, Vector3D v)
 {
-    return v.X.ToString("0.000") + "," + v.Y.ToString("0.000") + "," + v.Z.ToString("0.000");
+    sb.Append(v.X.ToString("0.000"));
+    sb.Append(',');
+    sb.Append(v.Y.ToString("0.000"));
+    sb.Append(',');
+    sb.Append(v.Z.ToString("0.000"));
 }
 
 void WriteEcho()
 {
-    StringBuilder sb = new StringBuilder();
+    StringBuilder sb = _echoSb;
+    sb.Clear();
     sb.AppendLine("Autopilot Mode");
     sb.AppendLine(autopilotEnabled ? "State: Enabled" : "State: Disabled");
     if (hasTarget)
@@ -1064,7 +1096,8 @@ List<ZoneAsteroidRecord> ParseZoneDbRecords(string customData)
         var ores = new List<string>();
         bool hasGps = false;
 
-        for (int j = i + 1; j < lines.Length; j++)
+        int j;
+        for (j = i + 1; j < lines.Length; j++)
         {
             string t = lines[j].Trim();
             if (string.IsNullOrWhiteSpace(t))
@@ -1089,6 +1122,8 @@ List<ZoneAsteroidRecord> ParseZoneDbRecords(string customData)
                 gpsLine = t;
             }
         }
+
+        i = j - 1;
 
         if (!hasGps)
             continue;
@@ -1312,7 +1347,7 @@ IMyTimerBlock FindPathTimer()
     if (_cachedPathTimer != null &&
         _cachedPathTimer.CustomName.IndexOf(pathTimerTag, StringComparison.OrdinalIgnoreCase) >= 0)
         return _cachedPathTimer;
-    foreach (var t in GetBlocks<IMyTimerBlock>())
+    foreach (var t in GetTimerBlocksCached())
         if (t != null && !string.IsNullOrWhiteSpace(t.CustomName) &&
             t.CustomName.IndexOf(pathTimerTag, StringComparison.OrdinalIgnoreCase) >= 0)
         {
@@ -1576,8 +1611,10 @@ void SimulateRecompile()
         gyros  = new GyroControl(rc, tickSpeed, allGyros);
     }
 
+    RefreshTimerCache();
     _cachedPathTimer   = null;
     _cachedZoneDbTimer = null;
+    _cachedStateIniTimer = null;
     InvalidateZoneDbCache();
     Echo("SaveAsteroid: recompile done.");
 }
@@ -1586,7 +1623,7 @@ void SimulateRecompile()
 HashSet<int> CollectAsteroidDbNumbers()
 {
     var nums = new HashSet<int>();
-    foreach (var t in GetBlocks<IMyTimerBlock>())
+    foreach (var t in GetTimerBlocksCached())
     {
         if (t == null || string.IsNullOrWhiteSpace(t.CustomName)) continue;
         if (t.CustomName.IndexOf(asteroidDbTagPfx, StringComparison.OrdinalIgnoreCase) < 0) continue;
@@ -1678,7 +1715,7 @@ void RunDbCheck(bool fix)
 // Finds a timer block whose name contains the given tag (case-insensitive).
 IMyTimerBlock FindTimerByTag(string tag)
 {
-    foreach (var t in GetBlocks<IMyTimerBlock>())
+    foreach (var t in GetTimerBlocksCached())
         if (t != null && !string.IsNullOrWhiteSpace(t.CustomName) &&
             t.CustomName.IndexOf(tag, StringComparison.OrdinalIgnoreCase) >= 0)
             return t;
@@ -1761,7 +1798,7 @@ Dictionary<string, double> CollectMinerOre()
 // Finds and returns the miner's Path timer block (null if not found).
 IMyTimerBlock FindMinerPathTimer()
 {
-    foreach (var t in GetBlocks<IMyTimerBlock>())
+    foreach (var t in GetTimerBlocksCached())
     {
         if (t == null || string.IsNullOrWhiteSpace(t.CustomName)) continue;
         if (t.CustomName.IndexOf(minerPathTimerTag, StringComparison.OrdinalIgnoreCase) >= 0)
@@ -2300,7 +2337,7 @@ IMyTimerBlock FindStateIniTimer()
         _cachedStateIniTimer.CustomName.IndexOf(stateIniTimerTag, StringComparison.OrdinalIgnoreCase) >= 0)
         return _cachedStateIniTimer;
 
-    foreach (var t in GetBlocks<IMyTimerBlock>())
+    foreach (var t in GetTimerBlocksCached())
     {
         if (t.CustomName.IndexOf(stateIniTimerTag, StringComparison.OrdinalIgnoreCase) >= 0)
         {
@@ -2311,6 +2348,20 @@ IMyTimerBlock FindStateIniTimer()
 
     _cachedStateIniTimer = null;
     return null;
+}
+
+void RefreshTimerCache()
+{
+    _timerBlocks.Clear();
+    GridTerminalSystem.GetBlocksOfType(_timerBlocks, b => b.CubeGrid.EntityId == Me.CubeGrid.EntityId);
+    _timerBlocksCached = true;
+}
+
+List<IMyTimerBlock> GetTimerBlocksCached()
+{
+    if (!_timerBlocksCached)
+        RefreshTimerCache();
+    return _timerBlocks;
 }
 
 void SaveState()
