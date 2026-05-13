@@ -376,8 +376,10 @@ void UpdateRuntimeMetrics()
 void Move ()
 {
     movementResetApplied = false;
-    Vector3D worldOffset = GetActiveTargetOffsetWorld();
-    Vector3D position = rc.GetPosition() + worldOffset;
+    MatrixD rcMatrix = rc.WorldMatrix;
+    Vector3D worldOffset = GetActiveTargetOffsetWorld(rcMatrix);
+    Vector3D rcPosition = rc.GetPosition();
+    Vector3D position = rcPosition + worldOffset;
     Vector3D toTarget = targetPosition - position;
     double tolerance = GetActiveArrivalTolerance();
 
@@ -392,13 +394,13 @@ void Move ()
         if (gravity.LengthSquared() > 0.001)
             up = Vector3D.Normalize(-gravity);
         else
-            up = rc.WorldMatrix.Up;
+            up = rcMatrix.Up;
     }
 
-    gyros.FaceVectors(forward, up);
+    gyros.FaceVectors(rcMatrix, forward, up);
 
     bool atPosition = toTarget.LengthSquared() < tolerance * tolerance;
-    bool aligned = IsOrientationAligned(forward, up, orientationToleranceDeg);
+    bool aligned = IsOrientationAligned(rcMatrix, forward, up, orientationToleranceDeg);
     if (atPosition)
     {
         thrust.Reset();
@@ -413,38 +415,55 @@ void Move ()
     {
         // During docking/undocking: prioritize lateral and forward/backward over vertical.
         // Use desiredUp as the vertical axis; fall back to RC's current up if unset.
-        Vector3D vertAxis = desiredUp.LengthSquared() > 0.001 ? Vector3D.Normalize(desiredUp) : rc.WorldMatrix.Up;
-        thrust.ApplyAccel(thrust.ControlPositionPrioritized(rcTarget, Vector3D.Zero, maxSpeedNow, vertAxis));
+        Vector3D vertAxis = desiredUp.LengthSquared() > 0.001 ? Vector3D.Normalize(desiredUp) : rcMatrix.Up;
+        thrust.ApplyAccel(thrust.ControlPositionPrioritizedFrom(rcPosition, rcTarget, Vector3D.Zero, maxSpeedNow, vertAxis));
     }
     else
     {
-        thrust.ApplyAccel(thrust.ControlPosition(rcTarget, Vector3D.Zero, maxSpeedNow));
+        thrust.ApplyAccel(thrust.ControlPositionFrom(rcPosition, rcTarget, Vector3D.Zero, maxSpeedNow));
     }
 }
 
 Vector3D GetTargetOffsetWorld()
 {
-    MatrixD wm = rc.WorldMatrix;
+    return GetTargetOffsetWorld(rc.WorldMatrix);
+}
+
+Vector3D GetTargetOffsetWorld(MatrixD wm)
+{
     return wm.Right * TOFFR + wm.Up * TOFFU + wm.Forward * TOFFF;
 }
 
 Vector3D GetDockConnectorOffsetWorld()
 {
-    MatrixD wm = rc.WorldMatrix;
+    return GetDockConnectorOffsetWorld(rc.WorldMatrix);
+}
+
+Vector3D GetDockConnectorOffsetWorld(MatrixD wm)
+{
     return wm.Right * connectorOffsetLocal.X + wm.Up * connectorOffsetLocal.Y + wm.Forward * connectorOffsetLocal.Z;
 }
 
 Vector3D GetActiveTargetOffsetWorld()
 {
+    return GetActiveTargetOffsetWorld(rc.WorldMatrix);
+}
+
+Vector3D GetActiveTargetOffsetWorld(MatrixD wm)
+{
     if (dockingState != DockingState.None)
-        return GetDockConnectorOffsetWorld();
-    return GetTargetOffsetWorld();
+        return GetDockConnectorOffsetWorld(wm);
+    return GetTargetOffsetWorld(wm);
 }
 
 bool IsOrientationAligned(Vector3D forward, Vector3D up, double toleranceDeg)
 {
+    return IsOrientationAligned(rc.WorldMatrix, forward, up, toleranceDeg);
+}
+
+bool IsOrientationAligned(MatrixD wm, Vector3D forward, Vector3D up, double toleranceDeg)
+{
     double minDot = Math.Cos(Math.Max(0.1, toleranceDeg) * Math.PI / 180.0);
-    MatrixD wm = rc.WorldMatrix;
     if (forward.LengthSquared() > 0.001 && Vector3D.Dot(wm.Forward, Vector3D.Normalize(forward)) < minDot)
         return false;
     if (up.LengthSquared() > 0.001 && Vector3D.Dot(wm.Up, Vector3D.Normalize(up)) < minDot)
@@ -3185,22 +3204,32 @@ class GyroControl
             /// </summary>
     public void FaceVectors2 (Vector3D forward, Vector3D up)
     {
+        FaceVectors2(rc.WorldMatrix, forward, up);
+    }
+
+    public void FaceVectors2 (MatrixD current, Vector3D forward, Vector3D up)
+    {
         // In (pitch, yaw, roll)
-        Vector3D error = -GetAngles2(rc.WorldMatrix, forward, up);
+        Vector3D error = -GetAngles2(current, forward, up);
         Vector3D angles = new Vector3D(anglePID.Control(error));
         ApplyFineDamping(error, ref angles);
-        ApplyGyroOverride(rc.WorldMatrix, angles);
+        ApplyGyroOverride(current, angles);
     }
     /// <summary>
             /// Prioritizes forward vector.
             /// </summary>
     public void FaceVectors (Vector3D forward, Vector3D up)
     {
+        FaceVectors(rc.WorldMatrix, forward, up);
+    }
+
+    public void FaceVectors (MatrixD current, Vector3D forward, Vector3D up)
+    {
         // In (pitch, yaw, roll)
-        Vector3D error = -GetAngles(rc.WorldMatrix, forward, up);
+        Vector3D error = -GetAngles(current, forward, up);
         Vector3D angles = new Vector3D(anglePID.Control(error));
         ApplyFineDamping(error, ref angles);
-        ApplyGyroOverride(rc.WorldMatrix, angles);
+        ApplyGyroOverride(current, angles);
     }
 
     void ApplyFineDamping(Vector3D error, ref Vector3D angles)
@@ -3242,7 +3271,8 @@ class GyroControl
             gyro.Pitch = (float)transVect.X;
             gyro.Yaw = (float)transVect.Y;
             gyro.Roll = (float)transVect.Z;
-            gyro.GyroOverride = true;
+            if (!gyro.GyroOverride)
+                gyro.GyroOverride = true;
         }
     }
 
@@ -3415,6 +3445,9 @@ class ThrusterControl
     IMyShipController rc;
 
     VectorPID pid;
+    double cachedTotalMass = 0;
+    int massCacheTicks = 0;
+    const int massRefreshIntervalTicks = 10;
 
     public void Reset ()
     {
@@ -3443,14 +3476,24 @@ class ThrusterControl
 
     public Vector3D ControlPosition (Vector3D targetPosition, Vector3D targetVelocity, double maxSpeed = double.PositiveInfinity)
     {
-        return ControlVelocity(targetVelocity + VectorClamp(-pid.Control(rc.GetPosition() - targetPosition), maxSpeed));
+        return ControlPositionFrom(rc.GetPosition(), targetPosition, targetVelocity, maxSpeed);
+    }
+
+    public Vector3D ControlPositionFrom(Vector3D currentPosition, Vector3D targetPosition, Vector3D targetVelocity, double maxSpeed = double.PositiveInfinity)
+    {
+        return ControlVelocity(targetVelocity + VectorClamp(-pid.Control(currentPosition - targetPosition), maxSpeed));
     }
 
     // Like ControlPosition but caps vertical speed (along verticalAxis) to 30% of maxSpeed,
     // letting lateral and forward/backward movement use the full budget.
     public Vector3D ControlPositionPrioritized(Vector3D targetPosition, Vector3D targetVelocity, double maxSpeed, Vector3D verticalAxis, double verticalFraction = 0.2)
     {
-        Vector3D rawVel = targetVelocity + VectorClamp(-pid.Control(rc.GetPosition() - targetPosition), maxSpeed);
+        return ControlPositionPrioritizedFrom(rc.GetPosition(), targetPosition, targetVelocity, maxSpeed, verticalAxis, verticalFraction);
+    }
+
+    public Vector3D ControlPositionPrioritizedFrom(Vector3D currentPosition, Vector3D targetPosition, Vector3D targetVelocity, double maxSpeed, Vector3D verticalAxis, double verticalFraction = 0.2)
+    {
+        Vector3D rawVel = targetVelocity + VectorClamp(-pid.Control(currentPosition - targetPosition), maxSpeed);
 
         double vertComp = Vector3D.Dot(rawVel, verticalAxis);
         Vector3D horizVel = rawVel - vertComp * verticalAxis;
@@ -3488,7 +3531,17 @@ class ThrusterControl
         if (accel.Equals(Vector3D.Zero, 0.1))
             accel = Vector3D.Zero;
 
-        Vector3D thrust = accel * rc.CalculateShipMass().TotalMass;
+        if (massCacheTicks <= 0 || cachedTotalMass <= 0)
+        {
+            cachedTotalMass = rc.CalculateShipMass().TotalMass;
+            massCacheTicks = massRefreshIntervalTicks;
+        }
+        else
+        {
+            massCacheTicks--;
+        }
+
+        Vector3D thrust = accel * cachedTotalMass;
         foreach (IMyThrust t in thrusters)
         {
             if (!t.IsFunctional)
@@ -3498,12 +3551,14 @@ class ThrusterControl
             if (outputThrust > 0)
             {
                 float outputProportion = MathHelper.Clamp(outputThrust / t.MaxEffectiveThrust, minThrust / t.MaxThrust, 1);
-                t.ThrustOverridePercentage = outputProportion;
+                if (Math.Abs(t.ThrustOverridePercentage - outputProportion) > 0.001f)
+                    t.ThrustOverridePercentage = outputProportion;
                 thrust -= t.WorldMatrix.Forward * outputProportion * t.MaxEffectiveThrust;
             }
             else
             {
-                t.ThrustOverride = minThrust;
+                if (t.ThrustOverride != minThrust)
+                    t.ThrustOverride = minThrust;
             }
         }
     }
