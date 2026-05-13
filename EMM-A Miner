@@ -92,6 +92,7 @@ bool hasTarget = false;
 bool autopilotEnabled = false;
 Vector3D desiredForward = Vector3D.Zero;
 Vector3D desiredUp = Vector3D.Zero;
+bool movementResetApplied = false;
 
 enum MiningState
 {
@@ -299,8 +300,11 @@ public Program ()
 
 void ResetMovement()
 {
+    if (movementResetApplied)
+        return;
     gyros.Reset();
     thrust.Reset();
+    movementResetApplied = true;
 }
 
 public void Main (string argument, UpdateType updateSource)
@@ -371,6 +375,7 @@ void UpdateRuntimeMetrics()
 
 void Move ()
 {
+    movementResetApplied = false;
     Vector3D worldOffset = GetActiveTargetOffsetWorld();
     Vector3D position = rc.GetPosition() + worldOffset;
     Vector3D toTarget = targetPosition - position;
@@ -3094,7 +3099,8 @@ class GyroControl
                 gyros.RemoveAtFast(i);
                 continue;
             }
-            g.GyroOverride = false;
+            if (g.GyroOverride)
+                g.GyroOverride = false;
         }
         anglePID.Reset();
     }
@@ -3413,7 +3419,8 @@ class ThrusterControl
     public void Reset ()
     {
         foreach (IMyThrust t in thrusters)
-            t.ThrustOverride = 0;
+            if (t.ThrustOverride != 0)
+                t.ThrustOverride = 0;
     }
 
     public ThrusterControl (IMyShipController rc, UpdateFrequency tickSpeed, List<IMyThrust> thrusters)
