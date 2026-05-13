@@ -138,6 +138,8 @@ bool pathPaused = false;
 bool pathPausedNavResume = false;
 List<string> pathRecords = new List<string>();
 int pathIndex = 0;
+int pathCompleteBroadcastTicks = 0;
+const int pathCompleteBroadcastRepeatTicks = 600;
 Vector3D pathAnchorPos = Vector3D.Zero;
 Vector3D pathAnchorForward = Vector3D.Zero;
 Vector3D pathAnchorUp = Vector3D.Zero;
@@ -354,6 +356,7 @@ public void Main (string argument, UpdateType updateSource)
             ResetMovement();
 
         UpdatePathRunner();
+        UpdatePathCompleteBroadcast();
         if (oreTransferActive)
             UpdateOreTransfer();
         UpdateIndicatorLight();
@@ -1824,6 +1827,7 @@ void StartPathFromTimer()
     pathMode = true;
     pathPaused = false;
     pathPausedNavResume = false;
+    pathCompleteBroadcastTicks = 0;
     Echo($"Loaded {pathRecords.Count} path records from timer '{timerName}'.");
     StartNextPathRecord();
 }
@@ -1843,8 +1847,24 @@ void StartNextPathRecord()
     {
         pathMode = false;
         Echo("Path execution complete.");
-        IGC.SendBroadcastMessage(minerPathCompleteTag, "Path execution complete.");
+        pathCompleteBroadcastTicks = pathCompleteBroadcastRepeatTicks;
+        SendPathCompleteBroadcast();
     }
+}
+
+void UpdatePathCompleteBroadcast()
+{
+    if (pathCompleteBroadcastTicks <= 0)
+        return;
+
+    if (runtime % igcPollIntervalTicks == 0)
+        SendPathCompleteBroadcast();
+    pathCompleteBroadcastTicks--;
+}
+
+void SendPathCompleteBroadcast()
+{
+    IGC.SendBroadcastMessage(minerPathCompleteTag, "Path execution complete.");
 }
 
 bool ExecutePathRecord(string rawRecord)
@@ -2932,6 +2952,7 @@ void SaveState()
     ini.Set(StateIniSection, "pathPaused", pathPaused ? "1" : "0");
     ini.Set(StateIniSection, "pathPausedNavResume", pathPausedNavResume ? "1" : "0");
     ini.Set(StateIniSection, "pathIndex", pathIndex);
+    ini.Set(StateIniSection, "pathCompleteBroadcastTicks", pathCompleteBroadcastTicks);
     ini.Set(StateIniSection, "pathCount", pathRecords.Count);
     for (int i = 0; i < pathRecords.Count; i++)
         ini.Set(StateIniSection, "pathRecord" + i, pathRecords[i]);
@@ -2951,6 +2972,7 @@ void SaveState()
     ini.Set(StateIniSection, "pathRecordMineUp", V3ToString(pathRecordMineUp));
     ini.Set(StateIniSection, "pathRecordMineForward", V3ToString(pathRecordMineForward));
     ini.Set(StateIniSection, "pathRecordMineStage", (int)pathRecordMineStage);
+    ini.Set(StateIniSection, "autoMinedFromPathRecord", autoMinedFromPathRecord ? "1" : "0");
     ini.Set(StateIniSection, "pathRecordMeters", pathRecordMeters.ToString("R"));
     ini.Set(StateIniSection, "pathRecordMineDepth", pathRecordMineDepth.ToString("R"));
     ini.Set(StateIniSection, "cockpitGyroForcedOff", cockpitGyroControlForcedOff ? "1" : "0");
@@ -2962,6 +2984,12 @@ void SaveState()
     ini.Set(StateIniSection, "dockConnectRecompileTicksRemaining", dockConnectRecompileTicksRemaining);
     ini.Set(StateIniSection, "dockConnectRecompileArmed", dockConnectRecompileArmed ? "1" : "0");
     ini.Set(StateIniSection, "connectorOffsetLocal", V3ToString(connectorOffsetLocal));
+    ini.Set(StateIniSection, "saveAsteroidAfterDock", saveAsteroidAfterDock ? "1" : "0");
+    ini.Set(StateIniSection, "oreTransferActive", oreTransferActive ? "1" : "0");
+    ini.Set(StateIniSection, "carrierConnectorPos", V3ToString(carrierConnectorPos));
+    ini.Set(StateIniSection, "carrierConnectorForward", V3ToString(carrierConnectorForward));
+    ini.Set(StateIniSection, "carrierConnectorUp", V3ToString(carrierConnectorUp));
+    ini.Set(StateIniSection, "carrierPoseAgeSeconds", carrierPoseAgeSeconds.ToString("R"));
     WriteStateIni(ini);
 }
 
@@ -2996,6 +3024,7 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "pathPaused", pathPaused ? "1" : "0");
     ini.Set(ProgressIniSection, "pathPausedNavResume", pathPausedNavResume ? "1" : "0");
     ini.Set(ProgressIniSection, "pathIndex", pathIndex);
+    ini.Set(ProgressIniSection, "pathCompleteBroadcastTicks", pathCompleteBroadcastTicks);
     ini.Set(ProgressIniSection, "pathAnchorValid", pathAnchorValid ? "1" : "0");
     ini.Set(ProgressIniSection, "pathRecordingEnabled", pathRecordingEnabled ? "1" : "0");
     ini.Set(ProgressIniSection, "pathRecordingPaused", pathRecordingPaused ? "1" : "0");
@@ -3009,6 +3038,7 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "pathRecordMineUp", V3ToString(pathRecordMineUp));
     ini.Set(ProgressIniSection, "pathRecordMineForward", V3ToString(pathRecordMineForward));
     ini.Set(ProgressIniSection, "pathRecordMineStage", (int)pathRecordMineStage);
+    ini.Set(ProgressIniSection, "autoMinedFromPathRecord", autoMinedFromPathRecord ? "1" : "0");
     ini.Set(ProgressIniSection, "pathRecordMeters", pathRecordMeters.ToString("R"));
     ini.Set(ProgressIniSection, "pathRecordMineDepth", pathRecordMineDepth.ToString("R"));
     ini.Set(ProgressIniSection, "cockpitGyroForcedOff", cockpitGyroControlForcedOff ? "1" : "0");
@@ -3020,6 +3050,12 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "dockConnectRecompileTicksRemaining", dockConnectRecompileTicksRemaining);
     ini.Set(ProgressIniSection, "dockConnectRecompileArmed", dockConnectRecompileArmed ? "1" : "0");
     ini.Set(ProgressIniSection, "connectorOffsetLocal", V3ToString(connectorOffsetLocal));
+    ini.Set(ProgressIniSection, "saveAsteroidAfterDock", saveAsteroidAfterDock ? "1" : "0");
+    ini.Set(ProgressIniSection, "oreTransferActive", oreTransferActive ? "1" : "0");
+    ini.Set(ProgressIniSection, "carrierConnectorPos", V3ToString(carrierConnectorPos));
+    ini.Set(ProgressIniSection, "carrierConnectorForward", V3ToString(carrierConnectorForward));
+    ini.Set(ProgressIniSection, "carrierConnectorUp", V3ToString(carrierConnectorUp));
+    ini.Set(ProgressIniSection, "carrierPoseAgeSeconds", carrierPoseAgeSeconds.ToString("R"));
     WriteProgressState(ini);
 }
 
@@ -3072,6 +3108,7 @@ void LoadState()
     pathPaused = StateBool(ini, "pathPaused", pathPaused);
     pathPausedNavResume = StateBool(ini, "pathPausedNavResume", pathPausedNavResume);
     if (int.TryParse(StateString(ini, "pathIndex", pathIndex.ToString()), out n)) pathIndex = n;
+    if (int.TryParse(StateString(ini, "pathCompleteBroadcastTicks", pathCompleteBroadcastTicks.ToString()), out n)) pathCompleteBroadcastTicks = n;
 
     int pathCount = 0;
     if (int.TryParse(StateString(ini, "pathCount", "0"), out pathCount) && pathCount > 0)
@@ -3101,6 +3138,7 @@ void LoadState()
     if (TryParseV3(StateString(ini, "pathRecordMineUp", V3ToString(pathRecordMineUp)), out v)) pathRecordMineUp = v;
     if (TryParseV3(StateString(ini, "pathRecordMineForward", V3ToString(pathRecordMineForward)), out v)) pathRecordMineForward = v;
     if (int.TryParse(StateString(ini, "pathRecordMineStage", ((int)pathRecordMineStage).ToString()), out n)) pathRecordMineStage = (PathRecordMineStage)n;
+    autoMinedFromPathRecord = StateBool(ini, "autoMinedFromPathRecord", autoMinedFromPathRecord);
     if (double.TryParse(StateString(ini, "pathRecordMeters", pathRecordMeters.ToString("R")), out d)) pathRecordMeters = d;
     if (double.TryParse(StateString(ini, "pathRecordMineDepth", pathRecordMineDepth.ToString("R")), out d)) pathRecordMineDepth = d;
     cockpitGyroControlForcedOff = StateBool(ini, "cockpitGyroForcedOff", cockpitGyroControlForcedOff);
@@ -3112,6 +3150,15 @@ void LoadState()
     if (int.TryParse(StateString(ini, "dockConnectRecompileTicksRemaining", dockConnectRecompileTicksRemaining.ToString()), out n)) dockConnectRecompileTicksRemaining = n;
     dockConnectRecompileArmed = StateBool(ini, "dockConnectRecompileArmed", dockConnectRecompileArmed);
     if (TryParseV3(StateString(ini, "connectorOffsetLocal", V3ToString(connectorOffsetLocal)), out v)) connectorOffsetLocal = v;
+    saveAsteroidAfterDock = StateBool(ini, "saveAsteroidAfterDock", saveAsteroidAfterDock);
+    oreTransferActive = StateBool(ini, "oreTransferActive", oreTransferActive);
+    if (TryParseV3(StateString(ini, "carrierConnectorPos", V3ToString(carrierConnectorPos)), out v)) carrierConnectorPos = v;
+    if (TryParseV3(StateString(ini, "carrierConnectorForward", V3ToString(carrierConnectorForward)), out v)) carrierConnectorForward = v;
+    if (TryParseV3(StateString(ini, "carrierConnectorUp", V3ToString(carrierConnectorUp)), out v)) carrierConnectorUp = v;
+    if (double.TryParse(StateString(ini, "carrierPoseAgeSeconds", carrierPoseAgeSeconds.ToString("R")), out d)) carrierPoseAgeSeconds = d;
+
+    RecoverPathRecordsAfterLoad();
+    RecoverDockPoseAfterLoad();
 
     // If drills were actively running when the reload happened, turn them back on
     // and reset the stuck monitor so the stuck timer starts fresh.
@@ -3122,14 +3169,40 @@ void LoadState()
         ResetDepthAutoTracker();
     }
 
-    // Restore cockpit gyro override if path recording had it locked.
-    if (cockpitGyroControlForcedOff && rcCanControlGyros)
-        rc.SetValueBool("ControlGyros", false);
-
     // Restore mine indicator sensor if mid-recording-mine sequence.
     if (pathRecordingEnabled && pathRecordMineStage != PathRecordMineStage.Idle)
         SetMineIndicatorSensor(true);
+    if (oreTransferActive)
+        StartOreTransfer();
     fullStateDirty = false;
+}
+
+void RecoverPathRecordsAfterLoad()
+{
+    if (!pathMode || pathRecords.Count > 0)
+        return;
+
+    List<string> loaded;
+    string timerName;
+    if (TryLoadPathRecordsFromTimer(out loaded, out timerName))
+    {
+        pathRecords = loaded;
+        if (pathIndex < 0)
+            pathIndex = 0;
+        if (pathIndex > pathRecords.Count)
+            pathIndex = pathRecords.Count;
+    }
+    else
+    {
+        pathMode = false;
+        pathIndex = 0;
+    }
+}
+
+void RecoverDockPoseAfterLoad()
+{
+    if (dockingState != DockingState.None && !HasFreshCarrierPose())
+        autopilotEnabled = false;
 }
 
 bool TryParseGpsCommand(string command, out Vector3D gps, out Vector3D forward, out Vector3D up)

@@ -2436,6 +2436,11 @@ void SaveState()
     ini.Set(StateIniSection, "pathAnchorPos", V3ToString(pathAnchorPos));
     ini.Set(StateIniSection, "pathAnchorForward", V3ToString(pathAnchorForward));
     ini.Set(StateIniSection, "pathAnchorUp", V3ToString(pathAnchorUp));
+    ini.Set(StateIniSection, "goToMode", goToMode ? "1" : "0");
+    ini.Set(StateIniSection, "goToStage", goToStage);
+    ini.Set(StateIniSection, "goToFinalPosition", V3ToString(_goToFinalPosition));
+    ini.Set(StateIniSection, "goToFinalForward", V3ToString(_goToFinalForward));
+    ini.Set(StateIniSection, "goToFinalUp", V3ToString(_goToFinalUp));
     ini.Set(StateIniSection, "mineSequenceState", (int)mineSequenceState);
     ini.Set(StateIniSection, "mineAsteroidNum", mineAsteroidNum);
     ini.Set(StateIniSection, "mineSavedPos", V3ToString(mineSavedPos));
@@ -2445,6 +2450,9 @@ void SaveState()
     ini.Set(StateIniSection, "minerPathCompleteReceived", minerPathCompleteReceived ? "1" : "0");
     ini.Set(StateIniSection, "mineStationaryTicks", mineStationaryTicks);
     ini.Set(StateIniSection, "fullAutoEnabled", fullAutoEnabled ? "1" : "0");
+    ini.Set(StateIniSection, "fullAutoWaitingForMine", fullAutoWaitingForMine ? "1" : "0");
+    ini.Set(StateIniSection, "fullAutoCooldownTicks", fullAutoCooldownTicks);
+    ini.Set(StateIniSection, "fullAutoActiveAsteroid", fullAutoActiveAsteroid);
     WriteStateIni(ini);
 }
 
@@ -2465,6 +2473,11 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "pathPausedNavResume", pathPausedNavResume ? "1" : "0");
     ini.Set(ProgressIniSection, "pathIndex", pathIndex);
     ini.Set(ProgressIniSection, "pathAnchorValid", pathAnchorValid ? "1" : "0");
+    ini.Set(ProgressIniSection, "goToMode", goToMode ? "1" : "0");
+    ini.Set(ProgressIniSection, "goToStage", goToStage);
+    ini.Set(ProgressIniSection, "goToFinalPosition", V3ToString(_goToFinalPosition));
+    ini.Set(ProgressIniSection, "goToFinalForward", V3ToString(_goToFinalForward));
+    ini.Set(ProgressIniSection, "goToFinalUp", V3ToString(_goToFinalUp));
     ini.Set(ProgressIniSection, "mineSequenceState", (int)mineSequenceState);
     ini.Set(ProgressIniSection, "mineAsteroidNum", mineAsteroidNum);
     ini.Set(ProgressIniSection, "mineSavedPos", V3ToString(mineSavedPos));
@@ -2474,6 +2487,9 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "minerPathCompleteReceived", minerPathCompleteReceived ? "1" : "0");
     ini.Set(ProgressIniSection, "mineStationaryTicks", mineStationaryTicks);
     ini.Set(ProgressIniSection, "fullAutoEnabled", fullAutoEnabled ? "1" : "0");
+    ini.Set(ProgressIniSection, "fullAutoWaitingForMine", fullAutoWaitingForMine ? "1" : "0");
+    ini.Set(ProgressIniSection, "fullAutoCooldownTicks", fullAutoCooldownTicks);
+    ini.Set(ProgressIniSection, "fullAutoActiveAsteroid", fullAutoActiveAsteroid);
     WriteProgressState(ini);
 }
 
@@ -2514,6 +2530,11 @@ void LoadState()
     if (TryParseV3(StateString(ini, "pathAnchorPos", V3ToString(pathAnchorPos)), out v)) pathAnchorPos = v;
     if (TryParseV3(StateString(ini, "pathAnchorForward", V3ToString(pathAnchorForward)), out v)) pathAnchorForward = v;
     if (TryParseV3(StateString(ini, "pathAnchorUp", V3ToString(pathAnchorUp)), out v)) pathAnchorUp = v;
+    goToMode = StateBool(ini, "goToMode", goToMode);
+    if (int.TryParse(StateString(ini, "goToStage", goToStage.ToString()), out n)) goToStage = n;
+    if (TryParseV3(StateString(ini, "goToFinalPosition", V3ToString(_goToFinalPosition)), out v)) _goToFinalPosition = v;
+    if (TryParseV3(StateString(ini, "goToFinalForward", V3ToString(_goToFinalForward)), out v)) _goToFinalForward = v;
+    if (TryParseV3(StateString(ini, "goToFinalUp", V3ToString(_goToFinalUp)), out v)) _goToFinalUp = v;
     if (int.TryParse(StateString(ini, "mineSequenceState", ((int)mineSequenceState).ToString()), out n)) mineSequenceState = (MineSequenceState)n;
     if (int.TryParse(StateString(ini, "mineAsteroidNum", mineAsteroidNum.ToString()), out n)) mineAsteroidNum = n;
     if (TryParseV3(StateString(ini, "mineSavedPos", V3ToString(mineSavedPos)), out v)) mineSavedPos = v;
@@ -2523,11 +2544,39 @@ void LoadState()
     minerPathCompleteReceived = StateBool(ini, "minerPathCompleteReceived", minerPathCompleteReceived);
     if (int.TryParse(StateString(ini, "mineStationaryTicks", mineStationaryTicks.ToString()), out n)) mineStationaryTicks = n;
     fullAutoEnabled = StateBool(ini, "fullAutoEnabled", fullAutoEnabled);
-    fullAutoWaitingForMine = false;
-    fullAutoActiveAsteroid = 0;
-    fullAutoCooldownTicks = 0;
+    fullAutoWaitingForMine = StateBool(ini, "fullAutoWaitingForMine", fullAutoWaitingForMine);
+    if (int.TryParse(StateString(ini, "fullAutoActiveAsteroid", fullAutoActiveAsteroid.ToString()), out n)) fullAutoActiveAsteroid = n;
+    if (int.TryParse(StateString(ini, "fullAutoCooldownTicks", fullAutoCooldownTicks.ToString()), out n)) fullAutoCooldownTicks = n;
+    RecoverPathRecordsAfterLoad();
+    if (fullAutoWaitingForMine && mineSequenceState == MineSequenceState.None)
+    {
+        fullAutoWaitingForMine = false;
+        fullAutoActiveAsteroid = 0;
+    }
     ResetFullAutoSelection();
     fullStateDirty = false;
+}
+
+void RecoverPathRecordsAfterLoad()
+{
+    if (!pathMode || pathRecords.Count > 0)
+        return;
+
+    List<string> loaded;
+    string timerName;
+    if (TryLoadPathRecordsFromTimer(out loaded, out timerName))
+    {
+        pathRecords = loaded;
+        if (pathIndex < 0)
+            pathIndex = 0;
+        if (pathIndex > pathRecords.Count)
+            pathIndex = pathRecords.Count;
+    }
+    else
+    {
+        pathMode = false;
+        pathIndex = 0;
+    }
 }
 
 // ---- Parse helpers ----
