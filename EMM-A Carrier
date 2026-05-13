@@ -464,6 +464,11 @@ void Move()
             gyros.Reset();
         return;
     }
+    if (!aligned)
+    {
+        thrust.Reset();
+        return;
+    }
 
     double maxSpeedNow = activeMaxSpeed > 0 ? activeMaxSpeed : maxSpeed;
     Vector3D rcTarget  = targetPosition - worldOffset;
