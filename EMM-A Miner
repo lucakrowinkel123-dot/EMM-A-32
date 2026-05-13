@@ -220,6 +220,11 @@ bool saveAsteroidAfterDock = false;
 List<IMyTerminalBlock> _invBlocks = new List<IMyTerminalBlock>();
 List<MyInventoryItem> _invItems = new List<MyInventoryItem>();
 bool _invCached = false;
+bool _oreScanActive = false;
+bool _oreScanIncludeStone = false;
+int _oreScanBlockIndex = 0;
+double _oreScanTotal = 0;
+const int oreScanBlocksPerTick = 3;
 // Cached path timer reference to avoid repeated GTS scans during path recording
 IMyTimerBlock _cachedPathTimer;
 IMyTimerBlock _cachedStateIniTimer;
@@ -232,6 +237,7 @@ MyIni _stateIni = new MyIni();
 // periodically.
 int _progressSavesSinceFull = 0;
 const int FullSaveCadence = 10;
+bool fullStateDirty = false;
 int indicatorDelayTicksRemaining = 0;
 int indicatorFlashTicksRemaining = 0;
 enum IndicatorTransitionState { None, WaitEnableAfterColor, WaitNeutralAfterDisable }
@@ -2035,6 +2041,7 @@ void StartAreaMiningWithCorners(Vector3D cornerA, Vector3D cornerB, Vector3D up,
     miningEnabled = true;
     miningState = MiningState.EnterLane;
     _invCached = false; // refresh inventory block list for ore tracking
+    fullStateDirty = true;
     ResetDepthAutoTracker();
     TriggerPathPointFlash();
 
@@ -2414,7 +2421,10 @@ void ResetStuckMonitor()
 
 void ResetDepthAutoTracker()
 {
-    cachedOreAmount = GetOreAmount(depthMode == DepthMode.OrePlusStone);
+    if (depthMode == DepthMode.Default)
+        _oreScanActive = false;
+    else
+        StartOreAmountScan(depthMode == DepthMode.OrePlusStone);
     lastOreSnapshot = cachedOreAmount;
     lastOreGainDepth = 0;
     noOreGainTicks = 0;
@@ -2440,10 +2450,16 @@ bool ShouldFinishDrillForward()
         return depthProgress >= laneDepth || IsAtTargetPosition(targetPosition, miningArrivalTolerance);
 
     bool includeStone = depthMode == DepthMode.OrePlusStone;
-    if (oreCheckTick <= 0)
+    if (_oreScanActive)
     {
-        cachedOreAmount = GetOreAmount(includeStone);
-        oreCheckTick = oreCheckTickInterval;
+        if (UpdateOreAmountScan())
+            oreCheckTick = oreCheckTickInterval;
+    }
+    else if (oreCheckTick <= 0)
+    {
+        StartOreAmountScan(includeStone);
+        if (UpdateOreAmountScan())
+            oreCheckTick = oreCheckTickInterval;
     }
     else
     {
@@ -2473,6 +2489,57 @@ void RefreshInventoryCache()
     _invBlocks.Clear();
     GridTerminalSystem.GetBlocksOfType(_invBlocks, b => b.CubeGrid.EntityId == Me.CubeGrid.EntityId && b.HasInventory);
     _invCached = true;
+}
+
+void StartOreAmountScan(bool includeStone)
+{
+    if (!_invCached)
+        RefreshInventoryCache();
+    _oreScanActive = true;
+    _oreScanIncludeStone = includeStone;
+    _oreScanBlockIndex = 0;
+    _oreScanTotal = 0;
+}
+
+bool UpdateOreAmountScan()
+{
+    if (!_oreScanActive)
+        return true;
+
+    int scannedBlocks = 0;
+    while (_oreScanBlockIndex < _invBlocks.Count && scannedBlocks < oreScanBlocksPerTick)
+    {
+        var block = _invBlocks[_oreScanBlockIndex];
+        _oreScanBlockIndex++;
+        scannedBlocks++;
+
+        if (block == null || !block.IsFunctional)
+            continue;
+        int invCount = block.InventoryCount;
+        for (int i = 0; i < invCount; i++)
+        {
+            var inv = block.GetInventory(i);
+            if (inv == null)
+                continue;
+            _invItems.Clear();
+            inv.GetItems(_invItems);
+            foreach (var item in _invItems)
+            {
+                if (!string.Equals(item.Type.TypeId, "MyObjectBuilder_Ore", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (!_oreScanIncludeStone && string.Equals(item.Type.SubtypeId, "Stone", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                _oreScanTotal += (double)item.Amount;
+            }
+        }
+    }
+
+    if (_oreScanBlockIndex < _invBlocks.Count)
+        return false;
+
+    cachedOreAmount = _oreScanTotal;
+    _oreScanActive = false;
+    return true;
 }
 
 double GetOreAmount(bool includeStone)
@@ -2748,6 +2815,7 @@ IMyTimerBlock FindStateIniTimer()
 void SaveState()
 {
     _progressSavesSinceFull = 0;
+    fullStateDirty = false;
     MyIni ini = _stateIni;
     ini.Clear();
     ini.Set(StateIniSection, "autopilotEnabled", autopilotEnabled ? "1" : "0");
@@ -2816,11 +2884,11 @@ void SaveState()
 // the per-record loops (areaLane{i}, pathRecord{i}). Stable fields preserved
 // in _stateIni (lane anchor, drill axis, area entry pose, path anchor pose,
 // path record mine corners, etc.) come from whatever the last full SaveState
-// wrote. Every FullSaveCadence calls we promote to a full SaveState so any
-// stable field that changed mid-sequence still gets captured.
+// wrote. Full saves are promoted only when stable/collection state is dirty,
+// avoiding periodic areaLane{i}/pathRecord{i} rewrites when nothing changed.
 void SaveStateProgressOnly()
 {
-    if (_progressSavesSinceFull >= FullSaveCadence)
+    if (fullStateDirty && _progressSavesSinceFull >= FullSaveCadence)
     {
         SaveState();
         return;
@@ -2830,14 +2898,22 @@ void SaveStateProgressOnly()
     MyIni ini = _stateIni;
     ini.Set(StateIniSection, "autopilotEnabled", autopilotEnabled ? "1" : "0");
     ini.Set(StateIniSection, "hasTarget", hasTarget ? "1" : "0");
+    ini.Set(StateIniSection, "targetPosition", V3ToString(targetPosition));
+    ini.Set(StateIniSection, "desiredForward", V3ToString(desiredForward));
+    ini.Set(StateIniSection, "desiredUp", V3ToString(desiredUp));
     ini.Set(StateIniSection, "miningEnabled", miningEnabled ? "1" : "0");
     ini.Set(StateIniSection, "miningState", (int)miningState);
+    ini.Set(StateIniSection, "laneAnchor", V3ToString(laneAnchor));
+    ini.Set(StateIniSection, "drillAxis", V3ToString(drillAxis));
     ini.Set(StateIniSection, "laneDepth", laneDepth.ToString("R"));
     ini.Set(StateIniSection, "activeMaxSpeed", activeMaxSpeed.ToString("R"));
     ini.Set(StateIniSection, "depthMode", (int)depthMode);
     ini.Set(StateIniSection, "areaMiningMode", areaMiningMode ? "1" : "0");
     ini.Set(StateIniSection, "areaLaneIndex", areaLaneIndex);
     ini.Set(StateIniSection, "returnToMinePoseAfterArea", returnToMinePoseAfterArea ? "1" : "0");
+    ini.Set(StateIniSection, "areaMineEntryPos", V3ToString(areaMineEntryPos));
+    ini.Set(StateIniSection, "areaMineEntryForward", V3ToString(areaMineEntryForward));
+    ini.Set(StateIniSection, "areaMineEntryUp", V3ToString(areaMineEntryUp));
     ini.Set(StateIniSection, "retryLane", retryCurrentLane ? "1" : "0");
     ini.Set(StateIniSection, "stuckBackout", stuckBackout ? "1" : "0");
     ini.Set(StateIniSection, "stuckRetryCount", stuckRetryCount);
@@ -2849,8 +2925,14 @@ void SaveStateProgressOnly()
     ini.Set(StateIniSection, "pathRecordingEnabled", pathRecordingEnabled ? "1" : "0");
     ini.Set(StateIniSection, "pathRecordingPaused", pathRecordingPaused ? "1" : "0");
     ini.Set(StateIniSection, "pathRecordingWaitReturn", pathRecordingWaitReturn ? "1" : "0");
+    ini.Set(StateIniSection, "pathRecordLastPos", V3ToString(pathRecordLastPos));
     ini.Set(StateIniSection, "pathRecordCounter", pathRecordCounter);
     ini.Set(StateIniSection, "pathRecordMineCounter", pathRecordMineCounter);
+    ini.Set(StateIniSection, "pathRecordMineEntry", V3ToString(pathRecordMineEntry));
+    ini.Set(StateIniSection, "pathRecordMineCornerA", V3ToString(pathRecordMineCornerA));
+    ini.Set(StateIniSection, "pathRecordMineCornerB", V3ToString(pathRecordMineCornerB));
+    ini.Set(StateIniSection, "pathRecordMineUp", V3ToString(pathRecordMineUp));
+    ini.Set(StateIniSection, "pathRecordMineForward", V3ToString(pathRecordMineForward));
     ini.Set(StateIniSection, "pathRecordMineStage", (int)pathRecordMineStage);
     ini.Set(StateIniSection, "pathRecordMeters", pathRecordMeters.ToString("R"));
     ini.Set(StateIniSection, "pathRecordMineDepth", pathRecordMineDepth.ToString("R"));
@@ -2862,6 +2944,7 @@ void SaveStateProgressOnly()
     ini.Set(StateIniSection, "dockConnectRetryTicks", dockConnectRetryTicks);
     ini.Set(StateIniSection, "dockConnectRecompileTicksRemaining", dockConnectRecompileTicksRemaining);
     ini.Set(StateIniSection, "dockConnectRecompileArmed", dockConnectRecompileArmed ? "1" : "0");
+    ini.Set(StateIniSection, "connectorOffsetLocal", V3ToString(connectorOffsetLocal));
     WriteStateIni(ini);
 }
 
@@ -2970,6 +3053,7 @@ void LoadState()
     // Restore mine indicator sensor if mid-recording-mine sequence.
     if (pathRecordingEnabled && pathRecordMineStage != PathRecordMineStage.Idle)
         SetMineIndicatorSensor(true);
+    fullStateDirty = false;
 }
 
 bool TryParseGpsCommand(string command, out Vector3D gps, out Vector3D forward, out Vector3D up)

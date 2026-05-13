@@ -146,6 +146,7 @@ MyIni _stateIni = new MyIni();
 // saved pose, full pathRecords list) get re-snapshotted periodically.
 int _progressSavesSinceFull = 0;
 const int FullSaveCadence = 10;
+bool fullStateDirty = false;
 
 bool goToMode = false;
 int goToStage = 0; // 1 = flying to safe side-point, 2 = final approach to saved carrier pose
@@ -173,6 +174,15 @@ bool fullAutoEnabled = false;
 bool fullAutoWaitingForMine = false;
 int fullAutoCooldownTicks = 0;
 int fullAutoActiveAsteroid = 0;
+bool fullAutoSelecting = false;
+List<ZoneAsteroidRecord> fullAutoScanRecords = null;
+HashSet<string> fullAutoScanEnabledOres = null;
+int fullAutoScanIndex = 0;
+Vector3D fullAutoScanCurrent = Vector3D.Zero;
+ZoneAsteroidRecord fullAutoScanBest = null;
+double fullAutoScanBestDistSq = double.MaxValue;
+string fullAutoScanFailureReason = "no eligible asteroid found.";
+const int fullAutoRecordsPerTick = 5;
 
 class ZoneAsteroidRecord
 {
@@ -613,6 +623,7 @@ void RemoteCommand(string command)
             fullAutoWaitingForMine = false;
             fullAutoCooldownTicks = 0;
             fullAutoActiveAsteroid = 0;
+            ResetFullAutoSelection();
             Echo("Fullauto: enabled.");
             break;
         case "fullautostop":
@@ -620,6 +631,7 @@ void RemoteCommand(string command)
             fullAutoWaitingForMine = false;
             fullAutoCooldownTicks = 0;
             fullAutoActiveAsteroid = 0;
+            ResetFullAutoSelection();
             Echo("Fullauto: stopped.");
             break;
     }
@@ -816,11 +828,30 @@ void UpdateFullAuto()
     }
 
     if (mineSequenceState != MineSequenceState.None)
+    {
+        ResetFullAutoSelection();
         return;
+    }
+
+    if (!fullAutoSelecting)
+    {
+        string startReason;
+        if (!StartFullAutoSelection(out startReason))
+        {
+            Echo("Fullauto: " + startReason);
+            fullAutoCooldownTicks = Math.Max(1, fullAutoRetryTicks);
+            return;
+        }
+    }
 
     ZoneAsteroidRecord selected;
     string reason;
-    if (!TrySelectFullAutoAsteroid(out selected, out reason))
+    bool done = UpdateFullAutoSelection(out selected, out reason);
+    if (!done)
+        return;
+
+    ResetFullAutoSelection();
+    if (selected == null)
     {
         Echo("Fullauto: " + reason);
         fullAutoCooldownTicks = Math.Max(1, fullAutoRetryTicks);
@@ -838,6 +869,94 @@ void UpdateFullAuto()
     fullAutoWaitingForMine = true;
     fullAutoActiveAsteroid = selected.Number;
     Echo($"Fullauto: started Mine {selected.Number:D3}.");
+}
+
+bool StartFullAutoSelection(out string reason)
+{
+    reason = "";
+
+    IMyTimerBlock zoneDb = FindZoneDbTimer();
+    if (zoneDb == null)
+    {
+        reason = $"Zone DB timer '{zoneDbTimerTag}' not found.";
+        return false;
+    }
+
+    HashSet<string> enabledOres;
+    if (!TryGetEnabledOreSet(out enabledOres, out reason))
+        return false;
+    if (enabledOres.Count == 0)
+    {
+        reason = $"no enabled ores in timer '{oreNameTimerTag}'.";
+        return false;
+    }
+
+    List<ZoneAsteroidRecord> records = GetZoneDbRecordsCached();
+    if (records.Count == 0)
+    {
+        reason = "Zone DB has no asteroid records.";
+        return false;
+    }
+
+    fullAutoSelecting = true;
+    fullAutoScanRecords = records;
+    fullAutoScanEnabledOres = enabledOres;
+    fullAutoScanIndex = 0;
+    fullAutoScanCurrent = rc.GetPosition();
+    fullAutoScanBest = null;
+    fullAutoScanBestDistSq = double.MaxValue;
+    fullAutoScanFailureReason = "no Open asteroid matches enabled ores with a safe path.";
+    return true;
+}
+
+bool UpdateFullAutoSelection(out ZoneAsteroidRecord selected, out string reason)
+{
+    selected = null;
+    reason = fullAutoScanFailureReason;
+
+    if (!fullAutoSelecting || fullAutoScanRecords == null || fullAutoScanEnabledOres == null)
+    {
+        reason = "no eligible asteroid found.";
+        return true;
+    }
+
+    int processed = 0;
+    while (fullAutoScanIndex < fullAutoScanRecords.Count && processed < fullAutoRecordsPerTick)
+    {
+        ZoneAsteroidRecord rec = fullAutoScanRecords[fullAutoScanIndex];
+        fullAutoScanIndex++;
+        processed++;
+
+        if (!string.Equals(rec.Status, "Open", StringComparison.OrdinalIgnoreCase))
+            continue;
+        if (!RecordHasEnabledOre(rec, fullAutoScanEnabledOres))
+            continue;
+        if (!IsFullAutoPathSafe(fullAutoScanCurrent, rec, fullAutoScanRecords))
+            continue;
+
+        double distSq = Vector3D.DistanceSquared(fullAutoScanCurrent, rec.Position);
+        if (distSq < fullAutoScanBestDistSq)
+        {
+            fullAutoScanBestDistSq = distSq;
+            fullAutoScanBest = rec;
+        }
+    }
+
+    if (fullAutoScanIndex < fullAutoScanRecords.Count)
+        return false;
+
+    selected = fullAutoScanBest;
+    return true;
+}
+
+void ResetFullAutoSelection()
+{
+    fullAutoSelecting = false;
+    fullAutoScanRecords = null;
+    fullAutoScanEnabledOres = null;
+    fullAutoScanIndex = 0;
+    fullAutoScanBest = null;
+    fullAutoScanBestDistSq = double.MaxValue;
 }
 
 bool TrySelectFullAutoAsteroid(out ZoneAsteroidRecord selected, out string reason)
@@ -2197,6 +2316,7 @@ IMyTimerBlock FindStateIniTimer()
 void SaveState()
 {
     _progressSavesSinceFull = 0;
+    fullStateDirty = false;
     MyIni ini = _stateIni;
     ini.Clear();
     ini.Set(StateIniSection, "autopilotEnabled", autopilotEnabled ? "1" : "0");
@@ -2232,11 +2352,11 @@ void SaveState()
 // _stateIni and rewrites the INI string. Skips V3ToString calls and the
 // pathRecords loop. Stable fields (path anchor, mine saved pose, area lanes,
 // pathRecord{i}) are preserved from whatever the last full SaveState wrote
-// into _stateIni. Every FullSaveCadence calls we promote to a full SaveState
-// so any stable field that changed mid-sequence still gets captured.
+// into _stateIni. Full saves are promoted only when stable/collection state is
+// dirty, avoiding periodic pathRecord{i} rewrites when nothing changed.
 void SaveStateProgressOnly()
 {
-    if (_progressSavesSinceFull >= FullSaveCadence)
+    if (fullStateDirty && _progressSavesSinceFull >= FullSaveCadence)
     {
         SaveState();
         return;
@@ -2246,6 +2366,10 @@ void SaveStateProgressOnly()
     MyIni ini = _stateIni;
     ini.Set(StateIniSection, "autopilotEnabled", autopilotEnabled ? "1" : "0");
     ini.Set(StateIniSection, "hasTarget", hasTarget ? "1" : "0");
+    ini.Set(StateIniSection, "targetPosition", V3ToString(targetPosition));
+    ini.Set(StateIniSection, "desiredForward", V3ToString(desiredForward));
+    ini.Set(StateIniSection, "desiredUp", V3ToString(desiredUp));
+    ini.Set(StateIniSection, "activeMaxSpeed", activeMaxSpeed.ToString("R"));
     ini.Set(StateIniSection, "pathMode", pathMode ? "1" : "0");
     ini.Set(StateIniSection, "pathPaused", pathPaused ? "1" : "0");
     ini.Set(StateIniSection, "pathPausedNavResume", pathPausedNavResume ? "1" : "0");
@@ -2253,6 +2377,10 @@ void SaveStateProgressOnly()
     ini.Set(StateIniSection, "pathAnchorValid", pathAnchorValid ? "1" : "0");
     ini.Set(StateIniSection, "mineSequenceState", (int)mineSequenceState);
     ini.Set(StateIniSection, "mineAsteroidNum", mineAsteroidNum);
+    ini.Set(StateIniSection, "mineSavedPos", V3ToString(mineSavedPos));
+    ini.Set(StateIniSection, "mineSavedForward", V3ToString(mineSavedForward));
+    ini.Set(StateIniSection, "mineSavedUp", V3ToString(mineSavedUp));
+    ini.Set(StateIniSection, "mineFrontApproachPoint", V3ToString(mineFrontApproachPoint));
     ini.Set(StateIniSection, "minerPathCompleteReceived", minerPathCompleteReceived ? "1" : "0");
     ini.Set(StateIniSection, "mineStationaryTicks", mineStationaryTicks);
     ini.Set(StateIniSection, "fullAutoEnabled", fullAutoEnabled ? "1" : "0");
@@ -2307,6 +2435,8 @@ void LoadState()
     fullAutoWaitingForMine = false;
     fullAutoActiveAsteroid = 0;
     fullAutoCooldownTicks = 0;
+    ResetFullAutoSelection();
+    fullStateDirty = false;
 }
 
 // ---- Parse helpers ----
