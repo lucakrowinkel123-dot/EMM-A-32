@@ -83,6 +83,8 @@ ThrusterControl thrust;
 GyroControl gyros;
 IMyShipConnector carrierConnector;
 IMyLightingBlock indicatorLight;
+MatrixD _tickRcMatrix = MatrixD.Identity;
+Vector3D _tickRcPosition = Vector3D.Zero;
 List<IMyGyro>   allGyros     = new List<IMyGyro>();
 List<IMyThrust> allThrusters = new List<IMyThrust>();
 int indicatorDelayTicksRemaining = 0;
@@ -208,6 +210,7 @@ public Program()
         rc = GetBlock<IMyRemoteControl>();
     if (rc == null)
         throw new Exception("No remote control found. Set carrierRemoteName.");
+    RefreshTickPose();
 
     carrierConnector = GridTerminalSystem.GetBlockWithName(carrierConnectorName) as IMyShipConnector;
     indicatorLight = GridTerminalSystem.GetBlockWithName(indicatorLightName) as IMyLightingBlock;
@@ -243,6 +246,7 @@ public void Main(string argument, UpdateType updateSource)
     if (updateSource == UpdateType.Update1 || updateSource == UpdateType.Update10 || updateSource == UpdateType.Update100)
     {
         UpdateRuntimeMetrics();
+        RefreshTickPose();
         if (carrierConnector == null)
             carrierConnector = GridTerminalSystem.GetBlockWithName(carrierConnectorName) as IMyShipConnector;
 
@@ -422,12 +426,18 @@ void UpdateRuntimeMetrics()
     }
 }
 
+void RefreshTickPose()
+{
+    _tickRcMatrix = rc.WorldMatrix;
+    _tickRcPosition = rc.GetPosition();
+}
+
 void Move()
 {
     movementResetApplied = false;
-    MatrixD rcMatrix     = rc.WorldMatrix;
+    MatrixD rcMatrix     = _tickRcMatrix;
     Vector3D worldOffset = GetTargetOffsetWorld(rcMatrix);
-    Vector3D rcPosition  = rc.GetPosition();
+    Vector3D rcPosition  = _tickRcPosition;
     Vector3D position    = rcPosition + worldOffset;
     Vector3D toTarget    = targetPosition - position;
 
@@ -465,7 +475,7 @@ void Move()
 
 Vector3D GetTargetOffsetWorld()
 {
-    return GetTargetOffsetWorld(rc.WorldMatrix);
+    return GetTargetOffsetWorld(_tickRcMatrix);
 }
 
 Vector3D GetTargetOffsetWorld(MatrixD wm)
@@ -475,16 +485,28 @@ Vector3D GetTargetOffsetWorld(MatrixD wm)
 
 bool IsOrientationAligned(Vector3D forward, Vector3D up, double toleranceDeg)
 {
-    return IsOrientationAligned(rc.WorldMatrix, forward, up, toleranceDeg);
+    return IsOrientationAligned(_tickRcMatrix, forward, up, toleranceDeg);
 }
 
 bool IsOrientationAligned(MatrixD wm, Vector3D forward, Vector3D up, double toleranceDeg)
 {
     double minDot = Math.Cos(Math.Max(0.1, toleranceDeg) * Math.PI / 180.0);
-    if (forward.LengthSquared() > 0.001 && Vector3D.Dot(wm.Forward, Vector3D.Normalize(forward)) < minDot)
-        return false;
-    if (up.LengthSquared() > 0.001 && Vector3D.Dot(wm.Up, Vector3D.Normalize(up)) < minDot)
-        return false;
+    double forwardLenSq = forward.LengthSquared();
+    if (forwardLenSq > 0.001)
+    {
+        if (Math.Abs(forwardLenSq - 1) > 0.001)
+            forward /= Math.Sqrt(forwardLenSq);
+        if (Vector3D.Dot(wm.Forward, forward) < minDot)
+            return false;
+    }
+    double upLenSq = up.LengthSquared();
+    if (upLenSq > 0.001)
+    {
+        if (Math.Abs(upLenSq - 1) > 0.001)
+            up /= Math.Sqrt(upLenSq);
+        if (Vector3D.Dot(wm.Up, up) < minDot)
+            return false;
+    }
     return true;
 }
 
@@ -492,7 +514,7 @@ bool IsAtTargetPosition(Vector3D target, double toleranceMeters = -1)
 {
     double baseTolerance = toleranceMeters > 0 ? toleranceMeters : arrivalTolerance;
     double tolerance     = Math.Max(0.05, baseTolerance);
-    return Vector3D.DistanceSquared(rc.GetPosition() + GetTargetOffsetWorld(), target) < tolerance * tolerance;
+    return Vector3D.DistanceSquared(_tickRcPosition + GetTargetOffsetWorld(_tickRcMatrix), target) < tolerance * tolerance;
 }
 
 bool IsAtTargetPose(Vector3D target, Vector3D forward, Vector3D up, double toleranceMeters = -1)
@@ -934,7 +956,7 @@ bool StartFullAutoSelection(out string reason)
     fullAutoScanRecords = records;
     fullAutoScanEnabledOres = enabledOres;
     fullAutoScanIndex = 0;
-    fullAutoScanCurrent = rc.GetPosition();
+    fullAutoScanCurrent = _tickRcPosition;
     fullAutoScanBest = null;
     fullAutoScanBestDistSq = double.MaxValue;
     fullAutoScanFailureReason = "no Open asteroid matches enabled ores with a safe path.";
@@ -1019,7 +1041,7 @@ bool TrySelectFullAutoAsteroid(out ZoneAsteroidRecord selected, out string reaso
         return false;
     }
 
-    Vector3D current = rc.GetPosition();
+    Vector3D current = _tickRcPosition;
     ZoneAsteroidRecord best = null;
     double bestDistSq = double.MaxValue;
 
@@ -1600,6 +1622,8 @@ void SimulateRecompile()
     rc = GridTerminalSystem.GetBlockWithName(carrierRemoteName) as IMyRemoteControl;
     if (rc == null)
         rc = GetBlock<IMyRemoteControl>();
+    if (rc != null)
+        RefreshTickPose();
 
     carrierConnector = GridTerminalSystem.GetBlockWithName(carrierConnectorName) as IMyShipConnector;
 
@@ -2888,13 +2912,14 @@ class ThrusterControl
         foreach (IMyThrust t in thrusters)
         {
             if (!t.IsFunctional) continue;
-            float outputThrust = (float)Vector3D.Dot(t.WorldMatrix.Forward, thrustVec);
+            Vector3D thrustForward = t.WorldMatrix.Forward;
+            float outputThrust = (float)Vector3D.Dot(thrustForward, thrustVec);
             if (outputThrust > 0)
             {
                 float outputProportion = MathHelper.Clamp(outputThrust / t.MaxEffectiveThrust, minThrust / t.MaxThrust, 1);
                 if (Math.Abs(t.ThrustOverridePercentage - outputProportion) > 0.001f)
                     t.ThrustOverridePercentage = outputProportion;
-                thrustVec -= t.WorldMatrix.Forward * outputProportion * t.MaxEffectiveThrust;
+                thrustVec -= thrustForward * outputProportion * t.MaxEffectiveThrust;
             }
             else
             {

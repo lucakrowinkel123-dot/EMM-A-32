@@ -497,10 +497,22 @@ bool IsOrientationAligned(Vector3D forward, Vector3D up, double toleranceDeg)
 bool IsOrientationAligned(MatrixD wm, Vector3D forward, Vector3D up, double toleranceDeg)
 {
     double minDot = Math.Cos(Math.Max(0.1, toleranceDeg) * Math.PI / 180.0);
-    if (forward.LengthSquared() > 0.001 && Vector3D.Dot(wm.Forward, Vector3D.Normalize(forward)) < minDot)
-        return false;
-    if (up.LengthSquared() > 0.001 && Vector3D.Dot(wm.Up, Vector3D.Normalize(up)) < minDot)
-        return false;
+    double forwardLenSq = forward.LengthSquared();
+    if (forwardLenSq > 0.001)
+    {
+        if (Math.Abs(forwardLenSq - 1) > 0.001)
+            forward /= Math.Sqrt(forwardLenSq);
+        if (Vector3D.Dot(wm.Forward, forward) < minDot)
+            return false;
+    }
+    double upLenSq = up.LengthSquared();
+    if (upLenSq > 0.001)
+    {
+        if (Math.Abs(upLenSq - 1) > 0.001)
+            up /= Math.Sqrt(upLenSq);
+        if (Vector3D.Dot(wm.Up, up) < minDot)
+            return false;
+    }
     return true;
 }
 
