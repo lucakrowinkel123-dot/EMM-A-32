@@ -169,7 +169,7 @@ enum PathRecordMineStage
     ReturningToEntry
 }
 PathRecordMineStage pathRecordMineStage = PathRecordMineStage.Idle;
-bool autoMinedFromPathRecord = false;
+bool resumePathRecordingAfterMineArea = false;
 Vector3D stuckSamplePos = Vector3D.Zero;
 double stuckNoMoveSeconds = 0;
 int stuckRetryCount = 0;
@@ -677,7 +677,7 @@ void RemoteCommand (string command)
             pathRecordingPaused = false;
             pathRecordingWaitReturn = false;
             pathRecordMineStage = PathRecordMineStage.Idle;
-            autoMinedFromPathRecord = false;
+            resumePathRecordingAfterMineArea = false;
             dockingState = DockingState.None;
             SetCockpitGyroControl(true);
             activeMaxSpeed = 0;
@@ -699,6 +699,7 @@ void RemoteCommand (string command)
             areaPlanValid = false;
             retryCurrentLane = false;
             returnToMinePoseAfterArea = false;
+            resumePathRecordingAfterMineArea = false;
             activeMaxSpeed = 0;
             SetDrills(false);
             Echo("Mining cancelled.");
@@ -868,7 +869,7 @@ void StopPathRecording()
     pathRecordingPaused = false;
     pathRecordingWaitReturn = false;
     pathRecordMineStage = PathRecordMineStage.Idle;
-    autoMinedFromPathRecord = false;
+    resumePathRecordingAfterMineArea = false;
     SetCockpitGyroControl(true);
     SetMineIndicatorSensor(false);
     Echo("Path recording stopped.");
@@ -907,13 +908,14 @@ bool UpdatePathRecordState()
                     pathRecordMineDepth);
                 if (miningEnabled)
                 {
-                    autoMinedFromPathRecord = true;
+                    resumePathRecordingAfterMineArea = true;
                     pathRecordMineCornerA = Vector3D.Zero;
                     pathRecordMineCornerB = Vector3D.Zero;
-                    Echo("Auto-started minearea for recorded area.");
+                    Echo("Started minearea preview for recorded area.");
                     return false;
                 }
             }
+            resumePathRecordingAfterMineArea = false;
             pathRecordingPaused = false;
             Echo("Returned to mine entry. Path recording resumed.");
         }
@@ -2680,20 +2682,7 @@ void FinishAreaMining()
     areaLaneAnchors.Clear();
     areaLaneIndex = 0;
     areaPlanValid = false;
-    if (autoMinedFromPathRecord)
-    {
-        autoMinedFromPathRecord = false;
-        targetPosition = pathRecordMineEntry;
-        desiredUp = pathRecordMineUp;
-        desiredForward = pathRecordMineForward;
-        hasTarget = true;
-        autopilotEnabled = true;
-        activeMaxSpeed = SPEEDB;
-        pathRecordingWaitReturn = true;
-        pathRecordMineStage = PathRecordMineStage.ReturningToEntry;
-        Echo("Mining complete. Returning to mine pose...");
-    }
-    else if (returnToMinePoseAfterArea)
+    if (returnToMinePoseAfterArea)
     {
         targetPosition = areaMineEntryPos;
         desiredUp = areaMineEntryUp;
@@ -2702,6 +2691,11 @@ void FinishAreaMining()
         autopilotEnabled = true;
         activeMaxSpeed = SPEEDB;
         returnToMinePoseAfterArea = false;
+        if (resumePathRecordingAfterMineArea)
+        {
+            pathRecordingWaitReturn = true;
+            pathRecordMineStage = PathRecordMineStage.ReturningToEntry;
+        }
         Echo("Mining complete. Returning to mine pose...");
     }
     else
@@ -2992,7 +2986,7 @@ void SaveState()
     ini.Set(StateIniSection, "pathRecordMineUp", V3ToString(pathRecordMineUp));
     ini.Set(StateIniSection, "pathRecordMineForward", V3ToString(pathRecordMineForward));
     ini.Set(StateIniSection, "pathRecordMineStage", (int)pathRecordMineStage);
-    ini.Set(StateIniSection, "autoMinedFromPathRecord", autoMinedFromPathRecord ? "1" : "0");
+    ini.Set(StateIniSection, "resumePathRecordingAfterMineArea", resumePathRecordingAfterMineArea ? "1" : "0");
     ini.Set(StateIniSection, "pathRecordMeters", pathRecordMeters.ToString("R"));
     ini.Set(StateIniSection, "pathRecordMineDepth", pathRecordMineDepth.ToString("R"));
     ini.Set(StateIniSection, "cockpitGyroForcedOff", cockpitGyroControlForcedOff ? "1" : "0");
@@ -3063,7 +3057,7 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "pathRecordMineUp", V3ToString(pathRecordMineUp));
     ini.Set(ProgressIniSection, "pathRecordMineForward", V3ToString(pathRecordMineForward));
     ini.Set(ProgressIniSection, "pathRecordMineStage", (int)pathRecordMineStage);
-    ini.Set(ProgressIniSection, "autoMinedFromPathRecord", autoMinedFromPathRecord ? "1" : "0");
+    ini.Set(ProgressIniSection, "resumePathRecordingAfterMineArea", resumePathRecordingAfterMineArea ? "1" : "0");
     ini.Set(ProgressIniSection, "pathRecordMeters", pathRecordMeters.ToString("R"));
     ini.Set(ProgressIniSection, "pathRecordMineDepth", pathRecordMineDepth.ToString("R"));
     ini.Set(ProgressIniSection, "cockpitGyroForcedOff", cockpitGyroControlForcedOff ? "1" : "0");
@@ -3168,7 +3162,10 @@ void LoadState()
     if (TryParseV3(StateString(ini, "pathRecordMineUp", V3ToString(pathRecordMineUp)), out v)) pathRecordMineUp = v;
     if (TryParseV3(StateString(ini, "pathRecordMineForward", V3ToString(pathRecordMineForward)), out v)) pathRecordMineForward = v;
     if (int.TryParse(StateString(ini, "pathRecordMineStage", ((int)pathRecordMineStage).ToString()), out n)) pathRecordMineStage = (PathRecordMineStage)n;
-    autoMinedFromPathRecord = StateBool(ini, "autoMinedFromPathRecord", autoMinedFromPathRecord);
+    resumePathRecordingAfterMineArea = StateBool(
+        ini,
+        "resumePathRecordingAfterMineArea",
+        StateBool(ini, "autoMinedFromPathRecord", resumePathRecordingAfterMineArea));
     if (double.TryParse(StateString(ini, "pathRecordMeters", pathRecordMeters.ToString("R")), out d)) pathRecordMeters = d;
     if (double.TryParse(StateString(ini, "pathRecordMineDepth", pathRecordMineDepth.ToString("R")), out d)) pathRecordMineDepth = d;
     cockpitGyroControlForcedOff = StateBool(ini, "cockpitGyroForcedOff", cockpitGyroControlForcedOff);
