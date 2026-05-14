@@ -128,11 +128,19 @@ const int oreCheckTickInterval = 20; // refresh ore total every 20 ticks (~0.33s
 bool areaMiningMode = false;
 List<Vector3D> areaLaneAnchors = new List<Vector3D>();
 int areaLaneIndex = 0;
+int areaLaneCount = 0;
 bool areaPlanValid = false;
 Vector3D areaPlanCornerA = Vector3D.Zero;
 Vector3D areaPlanCornerB = Vector3D.Zero;
 Vector3D areaPlanUp = Vector3D.Zero;
 Vector3D areaPlanForward = Vector3D.Zero;
+Vector3D areaPlanRight = Vector3D.Zero;
+int areaPlanRows = 0;
+int areaPlanCols = 0;
+double areaPlanRowStart = 0;
+double areaPlanRowStep = 0;
+double areaPlanColStart = 0;
+double areaPlanColStep = 0;
 bool retryCurrentLane = false;
 bool returnToMinePoseAfterArea = false;
 Vector3D areaMineEntryPos = Vector3D.Zero;
@@ -663,6 +671,7 @@ void RemoteCommand (string command)
             areaMiningMode = false;
             areaLaneAnchors.Clear();
             areaLaneIndex = 0;
+            areaLaneCount = 0;
             areaPlanValid = false;
             retryCurrentLane = false;
             stuckRetryCount = 0;
@@ -696,6 +705,7 @@ void RemoteCommand (string command)
             areaMiningMode = false;
             areaLaneAnchors.Clear();
             areaLaneIndex = 0;
+            areaLaneCount = 0;
             areaPlanValid = false;
             retryCurrentLane = false;
             returnToMinePoseAfterArea = false;
@@ -2016,6 +2026,7 @@ void StartSingleLaneMining(string command)
     areaMiningMode = false;
     areaLaneAnchors.Clear();
     areaLaneIndex = 0;
+    areaLaneCount = 0;
     areaPlanValid = false;
     retryCurrentLane = false;
     stuckRetryCount = 0;
@@ -2086,8 +2097,7 @@ void StartAreaMiningWithCorners(Vector3D cornerA, Vector3D cornerB, Vector3D up,
         right = rc.WorldMatrix.Right;
     right = Vector3D.Normalize(right);
 
-    areaLaneAnchors = BuildRectangleLaneAnchors(cornerA, cornerB, up, right, MINEH, MINEW);
-    if (areaLaneAnchors.Count == 0)
+    if (!ConfigureAreaLanePlan(cornerA, cornerB, up, right, MINEH, MINEW))
     {
         Echo("Unable to generate area lanes.");
         return;
@@ -2102,6 +2112,7 @@ void StartAreaMiningWithCorners(Vector3D cornerA, Vector3D cornerB, Vector3D up,
     areaPlanCornerB = cornerB;
     areaPlanUp = up;
     areaPlanForward = forward;
+    areaPlanRight = right;
     areaMineEntryPos = rc.GetPosition();
     areaMineEntryForward = Vector3D.Normalize(rc.WorldMatrix.Forward);
     areaMineEntryUp = Vector3D.Normalize(rc.WorldMatrix.Up);
@@ -2111,7 +2122,7 @@ void StartAreaMiningWithCorners(Vector3D cornerA, Vector3D cornerB, Vector3D up,
     areaLaneIndex = 0;
     retryCurrentLane = false;
     stuckRetryCount = 0;
-    laneAnchor = areaLaneAnchors[areaLaneIndex];
+    laneAnchor = GetAreaLaneAnchor(areaLaneIndex);
     targetPosition = laneAnchor;
     activeMaxSpeed = SPEEDB;
     hasTarget = true;
@@ -2123,7 +2134,7 @@ void StartAreaMiningWithCorners(Vector3D cornerA, Vector3D cornerB, Vector3D up,
     ResetDepthAutoTracker();
     TriggerPathPointFlash();
 
-    Echo($"Area mining started. Lanes={areaLaneAnchors.Count}, depth={laneDepth:0.00}m");
+    Echo($"Area mining started. Lanes={areaLaneCount}, depth={laneDepth:0.00}m");
 }
 
 bool TryParseAreaOrientation(string modeText, Vector3D pointA, Vector3D pointB, out Vector3D up, out Vector3D forward)
@@ -2176,6 +2187,46 @@ bool TryParseAreaOrientation(string modeText, Vector3D pointA, Vector3D pointB, 
     }
 
     return false;
+}
+
+bool ConfigureAreaLanePlan(Vector3D leftUpper, Vector3D rightBottom, Vector3D up, Vector3D right, double laneHeight, double laneWidth)
+{
+    if (laneHeight <= 0 || laneWidth <= 0)
+        return false;
+
+    Vector3D down = -up;
+    Vector3D delta = rightBottom - leftUpper;
+    double height = Math.Abs(Vector3D.Dot(delta, down));
+    double width = Math.Abs(Vector3D.Dot(delta, right));
+
+    areaPlanRows = Math.Max(1, (int)Math.Ceiling(height / laneHeight));
+    areaPlanCols = Math.Max(1, (int)Math.Ceiling(width / laneWidth));
+    areaPlanRowStart = areaPlanRows > 1 ? laneHeight * 0.5 : height * 0.5;
+    areaPlanRowStep = areaPlanRows > 1 ? (height - laneHeight) / (areaPlanRows - 1) : 0;
+    areaPlanColStart = areaPlanCols > 1 ? laneWidth * 0.5 : width * 0.5;
+    areaPlanColStep = areaPlanCols > 1 ? (width - laneWidth) / (areaPlanCols - 1) : 0;
+    areaLaneCount = areaPlanRows * areaPlanCols;
+    return areaLaneCount > 0;
+}
+
+Vector3D GetAreaLaneAnchor(int index)
+{
+    if (areaPlanCols <= 0)
+        return laneAnchor;
+
+    if (index < 0)
+        index = 0;
+    if (areaLaneCount > 0 && index >= areaLaneCount)
+        index = areaLaneCount - 1;
+
+    int r = index / areaPlanCols;
+    int c = index % areaPlanCols;
+    bool reverse = (r % 2) == 1;
+    int ci = reverse ? (areaPlanCols - 1 - c) : c;
+    Vector3D down = -areaPlanUp;
+    return areaPlanCornerA +
+        down * (areaPlanRowStart + r * areaPlanRowStep) +
+        areaPlanRight * (areaPlanColStart + ci * areaPlanColStep);
 }
 
 List<Vector3D> BuildRectangleLaneAnchors(Vector3D leftUpper, Vector3D rightBottom, Vector3D up, Vector3D right, double laneHeight, double laneWidth)
@@ -2444,12 +2495,12 @@ void UpdateMiningState()
                     stuckBackout = false;
                     if (wasStuck) stuckRetryCount++;
                     bool giveUp = wasStuck && maxStuckRetries > 0 && stuckRetryCount >= maxStuckRetries;
-                    if (giveUp && areaMiningMode && areaLaneIndex + 1 < areaLaneAnchors.Count)
+                    if (giveUp && areaMiningMode && areaLaneIndex + 1 < areaLaneCount)
                     {
                         Echo($"Max retries ({maxStuckRetries}) reached. Skipping lane {areaLaneIndex + 1}.");
                         stuckRetryCount = 0;
                         areaLaneIndex++;
-                        laneAnchor = areaLaneAnchors[areaLaneIndex];
+                        laneAnchor = GetAreaLaneAnchor(areaLaneIndex);
                         ResetDepthAutoTracker();
                         miningState = MiningState.EnterLane;
                     }
@@ -2463,6 +2514,7 @@ void UpdateMiningState()
                         areaMiningMode = false;
                         areaLaneAnchors.Clear();
                         areaLaneIndex = 0;
+                        areaLaneCount = 0;
                         areaPlanValid = false;
                     }
                     else
@@ -2471,17 +2523,17 @@ void UpdateMiningState()
                         string retryInfo = maxStuckRetries > 0
                             ? $"attempt {stuckRetryCount + 1}/{maxStuckRetries}"
                             : "no limit";
-                        Echo($"Retrying lane {areaLaneIndex + 1}/{Math.Max(1, areaLaneAnchors.Count)} ({retryInfo})");
+                        Echo($"Retrying lane {areaLaneIndex + 1}/{Math.Max(1, areaLaneCount)} ({retryInfo})");
                     }
                 }
-                else if (areaMiningMode && areaLaneIndex + 1 < areaLaneAnchors.Count)
+                else if (areaMiningMode && areaLaneIndex + 1 < areaLaneCount)
                 {
                     stuckRetryCount = 0;
                     areaLaneIndex++;
-                    laneAnchor = areaLaneAnchors[areaLaneIndex];
+                    laneAnchor = GetAreaLaneAnchor(areaLaneIndex);
                     ResetDepthAutoTracker();
                     miningState = MiningState.EnterLane;
-                    Echo($"Proceeding to lane {areaLaneIndex + 1}/{areaLaneAnchors.Count}");
+                    Echo($"Proceeding to lane {areaLaneIndex + 1}/{areaLaneCount}");
                 }
                 else
                 {
@@ -2681,6 +2733,7 @@ void FinishAreaMining()
     areaMiningMode = false;
     areaLaneAnchors.Clear();
     areaLaneIndex = 0;
+    areaLaneCount = 0;
     areaPlanValid = false;
     if (returnToMinePoseAfterArea)
     {
@@ -2708,13 +2761,13 @@ void FinishAreaMining()
 
 void NextHole(bool skipToLast = false)
 {
-    if (areaLaneAnchors.Count == 0)
+    if (areaLaneCount == 0)
     {
         Echo("No area plan loaded. Start with minearea first.");
         return;
     }
-    int targetIndex = skipToLast ? areaLaneAnchors.Count - 1 : areaLaneIndex + 1;
-    bool atLastLane = skipToLast || targetIndex >= areaLaneAnchors.Count || targetIndex <= areaLaneIndex;
+    int targetIndex = skipToLast ? areaLaneCount - 1 : areaLaneIndex + 1;
+    bool atLastLane = skipToLast || targetIndex >= areaLaneCount || targetIndex <= areaLaneIndex;
 
     SetDrills(false);
     stuckRetryCount = 0;
@@ -2744,18 +2797,18 @@ void NextHole(bool skipToLast = false)
     if (miningState == MiningState.DrillForward)
     {
         miningState = MiningState.Backout;
-        Echo($"Backing out before advancing to hole {areaLaneIndex + 2}/{areaLaneAnchors.Count}...");
+        Echo($"Backing out before advancing to hole {areaLaneIndex + 2}/{areaLaneCount}...");
     }
     else
     {
         areaLaneIndex = targetIndex;
-        laneAnchor = areaLaneAnchors[areaLaneIndex];
+        laneAnchor = GetAreaLaneAnchor(areaLaneIndex);
         targetPosition = laneAnchor;
         desiredForward = drillAxis.LengthSquared() > 0.001 ? drillAxis : rc.WorldMatrix.Forward;
         activeMaxSpeed = SPEEDB;
         hasTarget = true;
         miningState = MiningState.EnterLane;
-        Echo($"Advancing to hole {areaLaneIndex + 1}/{areaLaneAnchors.Count}");
+        Echo($"Advancing to hole {areaLaneIndex + 1}/{areaLaneCount}");
     }
 }
 
@@ -2959,7 +3012,7 @@ void SaveState()
     ini.Set(StateIniSection, "retryLane", retryCurrentLane ? "1" : "0");
     ini.Set(StateIniSection, "stuckBackout", stuckBackout ? "1" : "0");
     ini.Set(StateIniSection, "stuckRetryCount", stuckRetryCount);
-    ini.Set(StateIniSection, "areaLaneCount", areaLaneAnchors.Count);
+    ini.Set(StateIniSection, "areaLaneCount", areaLaneCount);
     for (int i = 0; i < areaLaneAnchors.Count; i++)
         ini.Set(StateIniSection, "areaLane" + i, V3ToString(areaLaneAnchors[i]));
     ini.Set(StateIniSection, "pathMode", pathMode ? "1" : "0");
@@ -3027,6 +3080,7 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "depthMode", (int)depthMode);
     ini.Set(ProgressIniSection, "areaMiningMode", areaMiningMode ? "1" : "0");
     ini.Set(ProgressIniSection, "areaLaneIndex", areaLaneIndex);
+    ini.Set(ProgressIniSection, "areaLaneCount", areaLaneCount);
     ini.Set(ProgressIniSection, "areaPlanValid", areaPlanValid ? "1" : "0");
     ini.Set(ProgressIniSection, "areaPlanCornerA", V3ToString(areaPlanCornerA));
     ini.Set(ProgressIniSection, "areaPlanCornerB", V3ToString(areaPlanCornerB));
@@ -3120,6 +3174,7 @@ void LoadState()
     int laneCount = 0;
     if (int.TryParse(StateString(ini, "areaLaneCount", "0"), out laneCount) && laneCount > 0)
     {
+        areaLaneCount = laneCount;
         areaLaneAnchors = new List<Vector3D>(laneCount);
         for (int i = 0; i < laneCount; i++)
         {
@@ -3232,17 +3287,20 @@ void RecoverAreaLanesAfterLoad()
     if (!areaMiningMode)
         return;
 
-    if (areaLaneAnchors.Count == 0 && areaPlanValid)
+    if (areaPlanValid)
     {
         Vector3D right = Vector3D.Cross(areaPlanForward, areaPlanUp);
         if (right.LengthSquared() > 0.001)
         {
             right = Vector3D.Normalize(right);
-            areaLaneAnchors = BuildRectangleLaneAnchors(areaPlanCornerA, areaPlanCornerB, areaPlanUp, right, MINEH, MINEW);
+            areaPlanRight = right;
+            ConfigureAreaLanePlan(areaPlanCornerA, areaPlanCornerB, areaPlanUp, right, MINEH, MINEW);
         }
     }
+    else if (areaLaneCount <= 0 && areaLaneAnchors.Count > 0)
+        areaLaneCount = areaLaneAnchors.Count;
 
-    if (areaLaneAnchors.Count == 0)
+    if (areaLaneCount <= 0)
     {
         areaMiningMode = false;
         areaLaneIndex = 0;
@@ -3251,10 +3309,10 @@ void RecoverAreaLanesAfterLoad()
 
     if (areaLaneIndex < 0)
         areaLaneIndex = 0;
-    if (areaLaneIndex >= areaLaneAnchors.Count)
-        areaLaneIndex = areaLaneAnchors.Count - 1;
+    if (areaLaneIndex >= areaLaneCount)
+        areaLaneIndex = areaLaneCount - 1;
 
-    laneAnchor = areaLaneAnchors[areaLaneIndex];
+    laneAnchor = areaPlanValid ? GetAreaLaneAnchor(areaLaneIndex) : areaLaneAnchors[areaLaneIndex];
 }
 
 void RecoverDockPoseAfterLoad()
