@@ -164,6 +164,11 @@ bool cockpitGyroControlForcedOff = false;
 Vector3D pathRecordLastPos = Vector3D.Zero;
 int pathRecordCounter = 0;
 int pathRecordMineCounter = 0;
+bool pendingPathRecordAppend = false;
+string pendingPathRecordLine = "";
+string pendingPathRecordSuccessEcho = "";
+string pendingPathRecordFailureEcho = "";
+bool pendingPathRecordFlash = false;
 Vector3D pathRecordMineEntry = Vector3D.Zero;
 Vector3D pathRecordMineCornerA = Vector3D.Zero;
 Vector3D pathRecordMineCornerB = Vector3D.Zero;
@@ -369,6 +374,7 @@ public void Main (string argument, UpdateType updateSource)
             ResetMovement();
 
         UpdatePathRunner();
+        UpdatePendingPathRecordAppend();
         UpdatePathCompleteBroadcast();
         if (oreTransferActive)
             UpdateOreTransfer();
@@ -1016,12 +1022,11 @@ void HandlePathRecordMineStep()
         return;
     }
     string rec = FormatMineAreaLine(pathRecordMineCornerA, cornerB, anchorPos, pathRecordMineForward, pathRecordMineUp, pathRecordMineDepth);
-    if (!AppendPathRecordLine(rec))
-    {
-        Echo($"Mine area record ready but timer tag '{pathTimerTag}' not found.");
-        return;
-    }
-    TriggerPathPointFlash();
+    QueuePathRecordAppend(
+        rec,
+        "Mine area record saved.",
+        $"Mine area record ready but timer tag '{pathTimerTag}' not found.",
+        true);
 
     targetPosition = pathRecordMineEntry;
     desiredUp = pathRecordMineUp;
@@ -1211,6 +1216,41 @@ bool AppendPathRecordLine(string line)
         existing += "\n";
     timer.CustomData = existing + line + "\n";
     return true;
+}
+
+void QueuePathRecordAppend(string line, string successEcho, string failureEcho, bool flash)
+{
+    pendingPathRecordAppend = true;
+    pendingPathRecordLine = line;
+    pendingPathRecordSuccessEcho = successEcho;
+    pendingPathRecordFailureEcho = failureEcho;
+    pendingPathRecordFlash = flash;
+}
+
+void UpdatePendingPathRecordAppend()
+{
+    if (!pendingPathRecordAppend)
+        return;
+
+    string line = pendingPathRecordLine;
+    string successEcho = pendingPathRecordSuccessEcho;
+    string failureEcho = pendingPathRecordFailureEcho;
+    bool flash = pendingPathRecordFlash;
+    pendingPathRecordAppend = false;
+    pendingPathRecordLine = "";
+    pendingPathRecordSuccessEcho = "";
+    pendingPathRecordFailureEcho = "";
+    pendingPathRecordFlash = false;
+
+    if (AppendPathRecordLine(line))
+    {
+        if (flash)
+            TriggerPathPointFlash();
+        if (!string.IsNullOrWhiteSpace(successEcho))
+            Echo(successEcho);
+    }
+    else if (!string.IsNullOrWhiteSpace(failureEcho))
+        Echo(failureEcho);
 }
 
 IMyTimerBlock FindPathTimer()
@@ -3040,6 +3080,11 @@ void SaveState()
     ini.Set(StateIniSection, "pathRecordMineForward", V3ToString(pathRecordMineForward));
     ini.Set(StateIniSection, "pathRecordMineStage", (int)pathRecordMineStage);
     ini.Set(StateIniSection, "resumePathRecordingAfterMineArea", resumePathRecordingAfterMineArea ? "1" : "0");
+    ini.Set(StateIniSection, "pendingPathRecordAppend", pendingPathRecordAppend ? "1" : "0");
+    ini.Set(StateIniSection, "pendingPathRecordLine", pendingPathRecordLine);
+    ini.Set(StateIniSection, "pendingPathRecordSuccessEcho", pendingPathRecordSuccessEcho);
+    ini.Set(StateIniSection, "pendingPathRecordFailureEcho", pendingPathRecordFailureEcho);
+    ini.Set(StateIniSection, "pendingPathRecordFlash", pendingPathRecordFlash ? "1" : "0");
     ini.Set(StateIniSection, "pathRecordMeters", pathRecordMeters.ToString("R"));
     ini.Set(StateIniSection, "pathRecordMineDepth", pathRecordMineDepth.ToString("R"));
     ini.Set(StateIniSection, "cockpitGyroForcedOff", cockpitGyroControlForcedOff ? "1" : "0");
@@ -3112,6 +3157,11 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "pathRecordMineForward", V3ToString(pathRecordMineForward));
     ini.Set(ProgressIniSection, "pathRecordMineStage", (int)pathRecordMineStage);
     ini.Set(ProgressIniSection, "resumePathRecordingAfterMineArea", resumePathRecordingAfterMineArea ? "1" : "0");
+    ini.Set(ProgressIniSection, "pendingPathRecordAppend", pendingPathRecordAppend ? "1" : "0");
+    ini.Set(ProgressIniSection, "pendingPathRecordLine", pendingPathRecordLine);
+    ini.Set(ProgressIniSection, "pendingPathRecordSuccessEcho", pendingPathRecordSuccessEcho);
+    ini.Set(ProgressIniSection, "pendingPathRecordFailureEcho", pendingPathRecordFailureEcho);
+    ini.Set(ProgressIniSection, "pendingPathRecordFlash", pendingPathRecordFlash ? "1" : "0");
     ini.Set(ProgressIniSection, "pathRecordMeters", pathRecordMeters.ToString("R"));
     ini.Set(ProgressIniSection, "pathRecordMineDepth", pathRecordMineDepth.ToString("R"));
     ini.Set(ProgressIniSection, "cockpitGyroForcedOff", cockpitGyroControlForcedOff ? "1" : "0");
@@ -3221,6 +3271,11 @@ void LoadState()
         ini,
         "resumePathRecordingAfterMineArea",
         StateBool(ini, "autoMinedFromPathRecord", resumePathRecordingAfterMineArea));
+    pendingPathRecordAppend = StateBool(ini, "pendingPathRecordAppend", pendingPathRecordAppend);
+    pendingPathRecordLine = StateString(ini, "pendingPathRecordLine", pendingPathRecordLine);
+    pendingPathRecordSuccessEcho = StateString(ini, "pendingPathRecordSuccessEcho", pendingPathRecordSuccessEcho);
+    pendingPathRecordFailureEcho = StateString(ini, "pendingPathRecordFailureEcho", pendingPathRecordFailureEcho);
+    pendingPathRecordFlash = StateBool(ini, "pendingPathRecordFlash", pendingPathRecordFlash);
     if (double.TryParse(StateString(ini, "pathRecordMeters", pathRecordMeters.ToString("R")), out d)) pathRecordMeters = d;
     if (double.TryParse(StateString(ini, "pathRecordMineDepth", pathRecordMineDepth.ToString("R")), out d)) pathRecordMineDepth = d;
     cockpitGyroControlForcedOff = StateBool(ini, "cockpitGyroForcedOff", cockpitGyroControlForcedOff);
